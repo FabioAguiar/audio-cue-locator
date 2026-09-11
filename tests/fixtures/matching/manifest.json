@@ -1,0 +1,119 @@
+{
+  "artifact_type": "matching_regression_fixture_manifest",
+  "manifest_version": "1.0.0",
+  "description": "Deterministic synthetic fixtures for the M2-03 timestamp/score regression suite (tests/test_matching_regression.py), exercising the existing M2-02 match_cue baseline (src/audio_cue_locator/infrastructure/acoustic_matching/baseline.py) against docs/matching-contract.md and docs/matching-baseline.md, which this manifest does not redefine. Every array is a plain list of finite floats; the consuming test converts each to a CANONICAL_AUDIO_SPEC-conformant (mono, float32) numpy array itself -- this manifest does not declare its own sample rate, since the canonical sample rate is owned by CANONICAL_AUDIO_SPEC and must not be duplicated here. Each case's expected outcome and evidentiary values are derived analytically from docs/matching-baseline.md's documented algorithm (normalized cross-correlation via numpy.correlate 'valid' mode, integer-lag best-candidate search, and the deterministic degenerate-input table in its section 5), not from executing the suite.",
+  "cases": [
+    {
+      "case_id": "found_offset_near_start",
+      "category": "found_known_offset",
+      "description": "Cue embedded verbatim at a known early sample offset inside an otherwise silent source. The window at cue_start_sample is identical to the cue, so normalized cross-correlation reaches its Cauchy-Schwarz equality bound (score exactly 1.0); every other window either has ~zero energy (untouched silence) or a strict partial overlap that cannot be a positive scalar multiple of the cue (the cue has no zero-valued sample), so the maximum is unique at cue_start_sample.",
+      "cue": [0.7, -0.5, 0.2, -0.8, 0.4, 0.1],
+      "source": [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.7, -0.5, 0.2, -0.8, 0.4, 0.1,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+      ],
+      "expected_outcome": "found",
+      "cue_start_sample": 12,
+      "expected_score": 1.0,
+      "score_abs_tolerance": 1e-06,
+      "expected_diagnostic_best_score": null,
+      "diagnostic_best_score_abs_tolerance": null,
+      "expected_diagnostic_best_sample": null,
+      "expect_reason_substring": null
+    },
+    {
+      "case_id": "found_offset_near_end",
+      "category": "found_known_offset",
+      "description": "A second, distinct known offset and a longer, differently-shaped cue, embedded near the end of a longer silent source, covering a different lag magnitude than found_offset_near_start. Same Cauchy-Schwarz uniqueness argument applies: the cue has no zero-valued sample, so only the exact placement is proportional to the cue.",
+      "cue": [0.3, 0.9, -0.6, 0.15, -0.45, 0.75, -0.2],
+      "source": [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+        0.3, 0.9, -0.6, 0.15, -0.45, 0.75, -0.2,
+        0.0, 0.0
+      ],
+      "expected_outcome": "found",
+      "cue_start_sample": 53,
+      "expected_score": 1.0,
+      "score_abs_tolerance": 1e-06,
+      "expected_diagnostic_best_score": null,
+      "diagnostic_best_score_abs_tolerance": null,
+      "expected_diagnostic_best_sample": null,
+      "expect_reason_substring": null
+    },
+    {
+      "case_id": "no_match_absent_cue",
+      "category": "no_match_absent_cue",
+      "description": "A zero-sum alternating cue against a flat, non-silent source. dot(window, cue) is exactly value*(1-1+1-1) = 0 for every window of a constant source, at every lag, regardless of the constant's magnitude; both window and cue have nonzero energy, so the score is a genuine, non-defaulted 0.0 at every lag (not the degenerate-energy fallback), correctly resolving to no_match with diagnostic evidence retained, not an error.",
+      "cue": [1.0, -1.0, 1.0, -1.0],
+      "source": [
+        0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3,
+        0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3,
+        0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3,
+        0.3, 0.3, 0.3, 0.3, 0.3, 0.3
+      ],
+      "expected_outcome": "no_match",
+      "cue_start_sample": null,
+      "expected_score": null,
+      "score_abs_tolerance": null,
+      "expected_diagnostic_best_score": 0.0,
+      "diagnostic_best_score_abs_tolerance": 1e-09,
+      "expected_diagnostic_best_sample": 0,
+      "expect_reason_substring": null
+    },
+    {
+      "case_id": "no_match_silent_cue",
+      "category": "no_match_silent_cue",
+      "description": "A zero-energy (silent) cue against a non-silent source: normalized correlation is mathematically undefined (0/0) at every lag, so baseline.py deterministically defines every score as 0.0 without computing the non-silent branch at all, resolving to no_match, never a crash or a fabricated found.",
+      "cue": [0.0, 0.0, 0.0, 0.0],
+      "source": [0.2, -0.2, 0.2, -0.2, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+      "expected_outcome": "no_match",
+      "cue_start_sample": null,
+      "expected_score": null,
+      "score_abs_tolerance": null,
+      "expected_diagnostic_best_score": 0.0,
+      "diagnostic_best_score_abs_tolerance": 1e-09,
+      "expected_diagnostic_best_sample": 0,
+      "expect_reason_substring": null
+    },
+    {
+      "case_id": "no_match_silent_source",
+      "category": "no_match_silent_source",
+      "description": "A non-silent cue against an entirely silent source: every window has ~zero energy, so every lag is excluded from the non-silent scoring branch and the score stays at its initialized 0.0 for all lags, resolving to no_match with the earliest lag (sample 0) reported as the tied diagnostic best candidate.",
+      "cue": [1.0, -1.0, 0.5, 0.25],
+      "source": [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0
+      ],
+      "expected_outcome": "no_match",
+      "cue_start_sample": null,
+      "expected_score": null,
+      "score_abs_tolerance": null,
+      "expected_diagnostic_best_score": 0.0,
+      "diagnostic_best_score_abs_tolerance": 1e-09,
+      "expected_diagnostic_best_sample": 0,
+      "expect_reason_substring": null
+    },
+    {
+      "case_id": "no_match_source_shorter_than_cue",
+      "category": "no_match_source_shorter_than_cue",
+      "description": "The source is shorter than the cue: docs/matching-contract.md section 1 explicitly allows this as a valid canonicalized input, so match_cue returns no_match via an explicit early branch before any candidate window is evaluated. No diagnostic candidate exists at all in this case (unlike the other no_match cases above), so timestamp, score and both diagnostic fields all stay unset (None); only a non-null reason distinguishes this branch.",
+      "cue": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+      "source": [0.1, 0.2, 0.3, 0.4],
+      "expected_outcome": "no_match",
+      "cue_start_sample": null,
+      "expected_score": null,
+      "score_abs_tolerance": null,
+      "expected_diagnostic_best_score": null,
+      "diagnostic_best_score_abs_tolerance": null,
+      "expected_diagnostic_best_sample": null,
+      "expect_reason_substring": "shorter than cue"
+    }
+  ]
+}
