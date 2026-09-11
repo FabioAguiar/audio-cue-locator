@@ -1,0 +1,2 @@
+This is a plain text file used as an invalid-media fixture for M1-04.
+It is intentionally not a parseable audio or video container.
