@@ -1,0 +1,199 @@
+# ============================================
+# ⚙️ SISTEMA / EDITORES
+# ============================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ============================================
+# 🐍 PYTHON
+# ============================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ============================================
+# 📓 JUPYTER NOTEBOOKS
+# ============================================
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+*.ipynb_checkpoints/
+
+# ============================================
+# 🌐 NODE / WEBUI
+# ============================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+.next/
+.nuxt/
+.svelte-kit/
+frontend/dist/
+web/dist/
+
+# ============================================
+# 💡 IDE / PROJETO
+# ============================================
+.vscode/
+.idea/
+
+# ============================================
+# 🔒 VARIÁVEIS DE AMBIENTE / CREDENCIAIS
+# ============================================
+.env
+.env.*
+*.env
+secrets.*
+credentials.*
+*.pem
+*.key
+
+# ============================================
+# 🎧 MÍDIA / ENTRADAS DE RUNTIME
+# ============================================
+data/raw/
+data/interim/
+data/processed/
+uploads/
+media/uploads/
+media/runtime/
+storage/uploads/
+storage/source/
+storage/cues/
+!data/.gitkeep
+!data/README.md
+!uploads/.gitkeep
+!uploads/README.md
+
+# Não ignorar extensões de áudio/vídeo globalmente.
+# Fixtures pequenas e curadas podem ser versionadas em tests/fixtures/.
+
+# ============================================
+# 🗄️ BANCO DE DADOS / ESTADO LOCAL
+# ============================================
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+runtime/
+state/
+!runtime/.gitkeep
+!runtime/README.md
+!state/.gitkeep
+!state/README.md
+
+# ============================================
+# 🧱 ARTEFATOS DERIVADOS
+# ============================================
+artifacts/**
+storage/artifacts/**
+storage/derived/**
+results/runtime/**
+cache/
+.cache/
+tmp/
+temp/
+!artifacts/.gitkeep
+!artifacts/README.md
+!results/.gitkeep
+!results/README.md
+
+# ============================================
+# 📈 WAVEFORMS / PREVIEWS / EXPORTAÇÕES
+# ============================================
+waveforms/**
+previews/**
+exports/**
+!waveforms/.gitkeep
+!waveforms/README.md
+!previews/.gitkeep
+!previews/README.md
+!exports/.gitkeep
+!exports/README.md
+
+# ============================================
+# 📑 RELATÓRIOS E LOGS
+# ============================================
+reports/*.log
+reports/runtime/**
+reports/artifacts/**
+!reports/.gitkeep
+!reports/README.md
+
+# logs genéricos e temporários
+*.log
+*.bak
+*.tmp
+*.old
+
+# ============================================
+# 🎛️ ÁUDIO CANÔNICO / CACHE DE PROCESSAMENTO
+# ============================================
+canonical/**
+canonical-audio/**
+processed-audio/**
+audio-cache/**
+!canonical/.gitkeep
+!canonical/README.md
+
+# ============================================
+# 📦 ARQUIVOS COMPACTADOS / EXPORTS LOCAIS
+# ============================================
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# ZIPs podem ser usados como fixtures ou artifacts versionados.
+# Portanto, não são ignorados globalmente.
+
+# ============================================
+# 🐳 DOCKER / VOLUMES LOCAIS
+# ============================================
+docker-data/
+volumes/
+.local-volumes/
+
+# ============================================
+# ⚙️ CONFIGURAÇÕES LOCAIS
+# ============================================
+config/local.json
+config/local.yaml
+config/local.yml
+config/local.toml
+*.local.json
+*.local.yaml
+*.local.yml
+*.local.toml
+
+# ============================================
+# 🧪 TEMPORÁRIOS / BACKUPS
+# ============================================
+~$*
+*_backup.*
+*.bak-*
+*.temp
+*.tmp

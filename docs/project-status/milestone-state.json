@@ -1,0 +1,109 @@
+{
+  "schema_version": "milestone_state.v1",
+  "artifact_type": "milestone_state",
+  "project_id": "audio-cue-locator",
+  "source_of_truth": {
+    "milestones_document": "docs/milestones.md",
+    "formal_issue_source": "support_workspace",
+    "architecture_document": "docs/architecture.md",
+    "vision_document": "docs/vision.md",
+    "operational_state_document": "docs/project-status/milestone-state.json"
+  },
+  "formal_issue_location": {
+    "workspace_alias": "project_support_root",
+    "project_support_subpath": "audio-cue-locator",
+    "formal_issues_index_pattern": "issues/{milestone_id}/formal-issues-index.json",
+    "formal_issue_json_pattern": "issues/{milestone_id}/{issue_id}/formal-issue.json",
+    "formal_issue_markdown_pattern": "issues/{milestone_id}/{issue_id}/issue.md",
+    "github_role": "publication_target_or_human_reference"
+  },
+  "current_milestone": {
+    "id": "M1",
+    "title": "Fundação e Pipeline de Mídia Canônica",
+    "status": "active"
+  },
+  "last_completed_milestone": null,
+  "completed_milestones": [],
+  "locked_completed_milestones": [],
+  "reopen_records": [],
+  "regression_policy": {
+    "allow_return_to_completed_milestone": false,
+    "requires_explicit_reopen_record": true
+  },
+  "validation_rules": {
+    "current_milestone_must_exist_in_milestones_document": true,
+    "current_milestone_must_not_be_completed": true,
+    "current_milestone_must_not_be_locked": true,
+    "completed_milestone_reopen_requires_record": true,
+    "milestones_document_is_planning_not_operational_state": true,
+    "implementation_documentation_strategy_is_not_defined_here": true
+  },
+  "implementation_documentation_boundary": {
+    "strategy_source": "docs/architecture.md",
+    "reflected_by": "docs/milestones.md",
+    "selected_strategy": "milestones-only",
+    "state_file_role": "This file records the operational milestone cursor only and does not create, update, or authorize implementation documentation."
+  },
+  "operational_boundary": {
+    "state": "This file records the observable operational milestone state for the audio-cue-locator project.",
+    "intent": "Project goals, milestone planning, architecture, and implementation documentation evaluation remain in project documents such as docs/vision.md, docs/architecture.md, and docs/milestones.md.",
+    "control": "Workflows and scripts may validate this state before continuing the pipeline; this file does not execute work, define workflow logic, publish issues, or authorize implementation."
+  },
+  "known_milestones": [
+    {
+      "id": "M1",
+      "title": "Fundação e Pipeline de Mídia Canônica",
+      "status": "active"
+    },
+    {
+      "id": "M2",
+      "title": "Baseline de Matching Acústico",
+      "status": "planned"
+    },
+    {
+      "id": "M3",
+      "title": "Modelo de Analysis e Resultados Estruturados",
+      "status": "planned"
+    },
+    {
+      "id": "M4",
+      "title": "Lifecycle Persistente de Analysis",
+      "status": "planned"
+    },
+    {
+      "id": "M5",
+      "title": "REST API v1",
+      "status": "planned"
+    },
+    {
+      "id": "M6",
+      "title": "WebUI Standalone",
+      "status": "planned"
+    },
+    {
+      "id": "M7",
+      "title": "Baseline Operacional Reproduzível",
+      "status": "planned"
+    }
+  ],
+  "notes": [
+    "This file records operational milestone state only.",
+    "M1 is the current active milestone for Fundação e Pipeline de Mídia Canônica in Audio Cue Locator.",
+    "No milestone has been completed yet.",
+    "Formal issues are resolved from the support workspace using formal_issue_location patterns; GitHub is only a publication target or human reference.",
+    "docs/milestones.md remains the planning document and must not be treated as the operational cursor.",
+    "docs/architecture.md defines the implementation documentation strategy; this file only records milestone state.",
+    "Issues, handoffs, workflows, and scripts may use this state as input for validation, but must not infer authorization to implement from this file alone.",
+    "This file should remain in the audio-cue-locator repository at docs/project-status/milestone-state.json.",
+    "There are no locked completed milestones because the project has not completed any milestone yet.",
+    "M1 should be validated against docs/milestones.md before workflow continuation.",
+    "The current milestone points to M1 because the project begins with Fundação e Pipeline de Mídia Canônica."
+  ],
+  "documentation_boundary": {
+    "vision_document": "docs/vision.md",
+    "architecture_document": "docs/architecture.md",
+    "milestones_document": "docs/milestones.md",
+    "implementation_documentation": "Defined by docs/architecture.md and reflected by docs/milestones.md when applicable; not decided by this state file.",
+    "state_document": "docs/project-status/milestone-state.json"
+  }
+}
