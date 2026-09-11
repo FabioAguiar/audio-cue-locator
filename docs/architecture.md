@@ -752,7 +752,29 @@ Características que precisam ser explícitas:
 - duração;
 - transformação aplicada.
 
-O valor definitivo de sample rate permanece pendente de validação.
+**Decisão (M1-03):** o contrato interno `CanonicalAudioSpec`
+(`src/audio_cue_locator/infrastructure/media_processing/canonical_audio.py`)
+fixa `sample_rate_hz=48000`, `channels=1` (mono), `sample_format="float32"`
+(amostras normalizadas em `[-1.0, 1.0]`), e normalização de amplitude
+habilitada por padrão (peak normalization, pico alvo `1.0`, com silêncio
+preservado sem divisão por zero). `FFmpegMediaAdapter.extract_audio`
+(M1-02) não faz resample nem downmix por conta própria; a canonicalização
+(resample para 48000 Hz, downmix para mono, conversão para float32 e
+normalização de pico) é responsabilidade desta camada, aplicada sobre a
+saída já decodificada pelo adapter. A justificativa técnica de cada
+parâmetro está registrada em `CANONICAL_AUDIO_JUSTIFICATIONS`, no mesmo
+módulo.
+
+Esta decisão foi tomada por inspeção do código do adapter já existente e
+por fatos estabelecidos de processamento digital de áudio (teorema de
+Nyquist-Shannon; convenções numpy/scipy para correlação), e não por
+evidência de probing/decode real (não-mockada) contra arquivos de mídia
+representativos: ffmpeg/ffprobe não estavam disponíveis no ambiente desta
+implementação (ver `PENDING_LIVE_PROBING_VERIFICATION` no mesmo módulo).
+A decisão é explicitamente revisável: qualquer alteração futura, motivada
+por essa verificação empírica pendente ou por evidência de matching, deve
+ser explícita e acompanhada de regressão dos testes de mídia, conforme as
+Notas de Continuidade de M1 — nunca uma redefinição silenciosa.
 
 ### Temporary Artifacts
 
@@ -1271,9 +1293,9 @@ Ainda precisam de definição ou validação:
 - lista inicial de containers de vídeo suportados;
 - tamanho e duração máximos aceitos;
 - quantidade máxima inicial de cues por Analysis;
-- representação canônica exata de samples;
-- sample rate canônico;
-- necessidade de normalização de amplitude e método correspondente;
+- verificação empírica (probing/decode real, não-mockado) dos parâmetros de
+  áudio canônico decididos em M1-03 (`CanonicalAudioSpec`), pendente de
+  ffmpeg/ffprobe disponíveis no ambiente de implementação;
 - método preciso de correlação;
 - uso de correlação direta ou baseada em FFT conforme tamanho;
 - threshold padrão;
