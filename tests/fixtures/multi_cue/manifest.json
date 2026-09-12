@@ -1,0 +1,114 @@
+{
+  "artifact_type": "multi_cue_analysis_fixture_manifest",
+  "manifest_version": "1.0.0",
+  "description": "Deterministic synthetic fixtures for the M3-07 multi-cue/multi-occurrence integration suite (tests/test_multi_cue_analysis.py), exercising the existing, unmodified M3-03/M3-05 orchestration entry point (run_multi_cue_analysis, src/audio_cue_locator/application/multi_cue_orchestration.py) and, through it, the existing unmodified M2-02 baseline matcher (match_cue, src/audio_cue_locator/infrastructure/acoustic_matching/baseline.py), which this manifest does not redefine. Every array is a plain list of finite floats; the consuming test converts each to a CANONICAL_AUDIO_SPEC-conformant (mono, float32) numpy array itself -- this manifest does not declare its own sample rate, since the canonical sample rate (48000 Hz) is owned by CANONICAL_AUDIO_SPEC and must not be duplicated here, mirroring tests/fixtures/matching/manifest.json's own convention. This manifest extends that same synthetic finite-float-array fixture lineage to a multi-cue Analysis (a source paired with more than one cue, per run_multi_cue_analysis's own (source, cues, configuration) signature) rather than reusing the M1-era real media files under tests/fixtures/ (sine_440hz_mono_1s.wav, video_with_audio.mp4, no_audio_stream.mp4, not_media.txt): those exist to exercise M1's canonicalization/probing error handling (tests/test_canonicalization_fixtures.py's own module docstring) and carry no documented cue occurrence, ground-truth position, or absence label, and tests/fixtures/matching/representative-manifest.json already recorded this identical 'not_reused' reasoning, plus this environment's confirmed FFmpeg/FFprobe unavailability, for the same 'reuse or extend the M1 audio/video fixtures' formal-issue language.",
+  "configuration_used_for_expected_values": {
+    "method": "normalized_cross_correlation_v1",
+    "acceptance_threshold": 0.75,
+    "source": "src/audio_cue_locator/infrastructure/acoustic_matching/baseline.py, DEFAULT_CONFIGURATION",
+    "note": "Every expected value below was computed against this exact configuration object; a consuming test must reuse DEFAULT_CONFIGURATION unchanged, per docs/multi-cue-orchestration.md's requirement that run_multi_cue_analysis be called with a caller-supplied EffectiveConfiguration, never a module-level default read internally."
+  },
+  "provenance": {
+    "asset_source": "synthetically_generated_in_manifest",
+    "reuse_rights_statement": "No external representative-media asset is used anywhere in this manifest. Every source and cue array is a deterministic, synthetically constructed finite-float list embedded directly as plain-list sample data, exactly as tests/fixtures/matching/manifest.json and tests/fixtures/matching/representative-manifest.json already do. No third-party reuse-rights, licensing, or attribution obligation applies to any asset in this manifest.",
+    "generation_method": "Authored once via a private Python script that imports the existing, unmodified match_cue baseline directly (no repository files were modified by that script) to compute and verify each case's per-cue outcome/score/timestamp_seconds/diagnostic_best_score against the real algorithm, mirroring tests/fixtures/matching/representative-manifest.json's own recorded authoring methodology. This is fixture-authoring tooling, not test execution: tests/test_multi_cue_analysis.py independently re-invokes run_multi_cue_analysis (and, through it, match_cue) at test time and asserts against these same documented values; no pytest run was performed while authoring this manifest.",
+    "verification_note": "Case 2's cue arrays are additively overlaid over a shared span of one source (see case_id cross_cue_temporal_overlap), so their resulting best-candidate positions were determined by the real correlation search, not by the offsets used to construct the source; the recorded expected_per_cue_outcomes below are the actual verified match_cue/run_multi_cue_analysis output for that exact source and those exact cue arrays, not a hand-derived approximation."
+  },
+  "cases": [
+    {
+      "case_id": "repeated_cue_and_absent_cue",
+      "category": "repeated_cue_and_absent_cue",
+      "description": "One Analysis with three cues against a single shared source containing one embedded burst: two independent cue_ids ('cue-repeat-first', 'cue-repeat-second') submit the identical cue array and must each independently resolve to their own accepted occurrence at the same position with the same score (repeated cue, acceptance criterion 1) -- attribution must follow cue_id, not array identity or iteration order, per docs/multi-cue-orchestration.md. A third cue_id ('cue-absent') submits the exact phase-inversion of the embedded burst (same shape and energy, opposite sign): at the burst's own position this scores a perfect negative correlation, and everywhere else in the source the window is silent (baseline.py's deterministic 0.0 fallback for a zero-energy window), so the maximum score across the whole source is 0.0, strictly below DEFAULT_CONFIGURATION's 0.75 threshold -- a deterministic no_match (absent cue, acceptance criterion 1), not a near-miss.",
+      "source": [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.9, -0.6, 0.3, -0.9, 0.6, 0.2,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+      ],
+      "cues": {
+        "cue-repeat-first": [0.9, -0.6, 0.3, -0.9, 0.6, 0.2],
+        "cue-repeat-second": [0.9, -0.6, 0.3, -0.9, 0.6, 0.2],
+        "cue-absent": [-0.9, 0.6, -0.3, 0.9, -0.6, -0.2]
+      },
+      "expected_per_cue_outcomes": {
+        "cue-repeat-first": {
+          "kind": "occurrences",
+          "occurrences": [
+            {
+              "temporal_position": 0.00025,
+              "score": 1.0,
+              "matching_method": "normalized_cross_correlation_v1",
+              "end": null
+            }
+          ],
+          "failure": null
+        },
+        "cue-repeat-second": {
+          "kind": "occurrences",
+          "occurrences": [
+            {
+              "temporal_position": 0.00025,
+              "score": 1.0,
+              "matching_method": "normalized_cross_correlation_v1",
+              "end": null
+            }
+          ],
+          "failure": null
+        },
+        "cue-absent": {
+          "kind": "no_match",
+          "occurrences": null,
+          "failure": null,
+          "match_cue_diagnostic_best_score": 0.6963323928919437,
+          "match_cue_diagnostic_best_timestamp_seconds": 0.0002708333333333333
+        }
+      }
+    },
+    {
+      "case_id": "cross_cue_temporal_overlap",
+      "category": "cross_cue_temporal_overlap",
+      "description": "One Analysis with two distinct cues ('cue-overlap-b', 'cue-overlap-c') against a single shared source in which both cues' waveforms are additively overlaid over a common span, simulating overlapping acoustic events. This is the required overlap/near-duplicate case, scoped exclusively to two distinct cues whose accepted occurrences overlap in time (docs/occurrence-temporal-semantics-and-policy.md fixes the current normalized_cross_correlation_v1 matcher at 0..1 occurrence per cue per call and states explicitly that occurrences of different cues are never grouped or deduplicated against each other, even when they overlap): each cue is independently matched with its own best-candidate position and score by run_multi_cue_analysis's per-cue call to the existing, unmodified match_cue, and both are accepted (found) at positions whose sample windows -- [best_index, best_index + len(cue)) -- intersect. Neither cue is asserted to produce more than one occurrence: this case never exercises same-cue multiplicity, which the current matcher does not support.",
+      "source": [
+        0.0, 0.0, 0.0, 0.0,
+        0.5, 0.6, -0.5, -0.6, 0.25000000000000006, -0.04999999999999999, 0.7, -0.7, -0.4, 0.3,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+      ],
+      "cues": {
+        "cue-overlap-b": [0.5, 0.6, -0.5, -0.6, 0.55, -0.45],
+        "cue-overlap-c": [-0.3, 0.4, 0.7, -0.7, -0.4, 0.3]
+      },
+      "expected_per_cue_outcomes": {
+        "cue-overlap-b": {
+          "kind": "occurrences",
+          "occurrences": [
+            {
+              "temporal_position": 8.333333333333333e-05,
+              "score": 0.9269001971687673,
+              "matching_method": "normalized_cross_correlation_v1",
+              "end": null
+            }
+          ],
+          "failure": null
+        },
+        "cue-overlap-c": {
+          "kind": "occurrences",
+          "occurrences": [
+            {
+              "temporal_position": 6.25e-05,
+              "score": 0.9327034484007398,
+              "matching_method": "normalized_cross_correlation_v1",
+              "end": null
+            }
+          ],
+          "failure": null
+        }
+      },
+      "expected_overlap": {
+        "sample_rate_hz_reference": "See CANONICAL_AUDIO_SPEC.sample_rate_hz (src/audio_cue_locator/infrastructure/media_processing/canonical_audio.py); not duplicated here.",
+        "cue-overlap-b_best_index": 4,
+        "cue-overlap-c_best_index": 3,
+        "overlapping_sample_indices": [4, 5, 6, 7, 8],
+        "note": "best_index values are derived by the consuming test as round(temporal_position * CANONICAL_AUDIO_SPEC.sample_rate_hz); recorded here for traceability of this manifest's own authoring verification, not as a value the test must read from JSON."
+      }
+    }
+  ]
+}

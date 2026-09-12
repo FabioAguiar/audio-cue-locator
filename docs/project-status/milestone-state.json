@@ -18,13 +18,13 @@
     "github_role": "publication_target_or_human_reference"
   },
   "current_milestone": {
-    "id": "M3",
-    "title": "Modelo de Analysis e Resultados Estruturados",
+    "id": "M4",
+    "title": "Lifecycle Persistente de Analysis",
     "status": "active"
   },
   "last_completed_milestone": {
-    "id": "M2",
-    "title": "Baseline de Matching Acústico",
+    "id": "M3",
+    "title": "Modelo de Analysis e Resultados Estruturados",
     "status": "completed"
   },
   "completed_milestones": [
@@ -37,6 +37,11 @@
       "id": "M2",
       "title": "Baseline de Matching Acústico",
       "status": "completed"
+    },
+    {
+      "id": "M3",
+      "title": "Modelo de Analysis e Resultados Estruturados",
+      "status": "completed"
     }
   ],
   "locked_completed_milestones": [
@@ -48,6 +53,11 @@
     {
       "id": "M2",
       "title": "Baseline de Matching Acústico",
+      "status": "locked"
+    },
+    {
+      "id": "M3",
+      "title": "Modelo de Analysis e Resultados Estruturados",
       "status": "locked"
     }
   ],
@@ -89,12 +99,12 @@
     {
       "id": "M3",
       "title": "Modelo de Analysis e Resultados Estruturados",
-      "status": "active"
+      "status": "completed"
     },
     {
       "id": "M4",
       "title": "Lifecycle Persistente de Analysis",
-      "status": "planned"
+      "status": "active"
     },
     {
       "id": "M5",
@@ -114,17 +124,17 @@
   ],
   "notes": [
     "This file records operational milestone state only.",
-    "M3 is the current active milestone for Modelo de Analysis e Resultados Estruturados in Audio Cue Locator.",
-    "M2 — Baseline de Matching Acústico — is completed and is the last completed milestone.",
-    "M1 and M2 are locked as completed milestones and require an explicit reopen record before any operational return to them.",
+    "M4 is the current active milestone for Lifecycle Persistente de Analysis in Audio Cue Locator.",
+    "M3 — Modelo de Analysis e Resultados Estruturados — is completed and is the last completed milestone.",
+    "M1, M2, and M3 are locked as completed milestones and require an explicit reopen record before any operational return to them.",
     "Formal issues are resolved from the support workspace using formal_issue_location patterns; GitHub is only a publication target or human reference.",
     "docs/milestones.md remains the planning document and must not be treated as the operational cursor.",
     "docs/architecture.md defines the implementation documentation strategy; this file only records milestone state.",
     "Issues, handoffs, workflows, and scripts may use this state as input for validation, but must not infer authorization to implement from this file alone.",
     "This file should remain in the audio-cue-locator repository at docs/project-status/milestone-state.json.",
-    "M3 depends on M1 and M2 being completed, including a reproducible canonical audio representation and a validated acoustic matching baseline.",
-    "M3 should be validated against docs/milestones.md before workflow continuation.",
-    "The current milestone points to M3 because the project has completed Baseline de Matching Acústico and is advancing to Modelo de Analysis e Resultados Estruturados."
+    "M4 depends on M3 being completed and on the Analysis and Result contracts being stable enough for local persistence and lifecycle execution.",
+    "M4 should be validated against docs/milestones.md before workflow continuation.",
+    "The current milestone points to M4 because the project has completed Modelo de Analysis e Resultados Estruturados and is advancing to Lifecycle Persistente de Analysis."
   ],
   "documentation_boundary": {
     "vision_document": "docs/vision.md",
