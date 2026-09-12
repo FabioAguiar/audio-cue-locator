@@ -19,18 +19,21 @@ descreve resolvem exatamente essa lacuna, e nenhuma outra.
 ## Posição no Fluxo
 
 ```text
+Infrastructure — Media Processing (M1-03)
+  CANONICAL_AUDIO_SPEC -> source/cues já canonicalizados
+      |
+      v
 Application (este documento)
   run_multi_cue_analysis(source, cues, configuration)
       |
-      | match_cue chamado exatamente uma vez por cue, mesma configuration
+      | match_cue exatamente uma vez por cue, mesma configuration
       v
 Infrastructure — Acoustic Matching (M2-02)
-  match_cue(source, cue, configuration) -> MatchResult
+  MatchResult
       |
-      | consome áudio já canonicalizado (contrato M1, inalterado)
+      | projeção M3-05, sem recalcular matching/aceitação
       v
-Infrastructure — Media Processing (M1-03)
-  CANONICAL_AUDIO_SPEC (sample_rate_hz, channels, sample_format, normalization)
+Application -> cue_id -> CueOccurrences | CueNoMatch | CueFailure
 ```
 
 `configuration` é o `EffectiveConfigurationSnapshot.matching` já anexado à
@@ -45,7 +48,7 @@ para cada chamada de `match_cue`.
 `intents/M3/M3-03/implementation-handoff.json` deixou deliberadamente em
 aberto se a orquestração seria uma função única ou uma classe com método
 explícito (G1). Este módulo adota uma função única,
-`run_multi_cue_analysis(source, cues, configuration) -> dict[str, MatchResult]`,
+`run_multi_cue_analysis(source, cues, configuration) -> dict[str, PerCueOutcome]`,
 pelos seguintes motivos:
 
 - `src/audio_cue_locator/core/` ainda não define nenhum tipo Python
@@ -80,24 +83,51 @@ Um mapeamento vazio levanta `ValueError`: `docs/analysis-core-contracts.md`
 sem nenhuma cue é uma violação de pré-condição de quem chama, não um caso
 válido de resultado vazio.
 
-## 3. Saída: `dict[str, MatchResult]` (Decisão G2)
+## 3. Saída: `dict[str, PerCueOutcome]` (M3-05)
 
-O per-cue outcome retornado para cada `cue_id` é o próprio `MatchResult`
-que `match_cue` já produz (`baseline.py`, M2-02) -- para os quatro valores
-de `MatchOutcome` (`FOUND`, `NO_MATCH`, `INVALID_INPUT`,
-`PROCESSING_FAILURE`), sem exceção e sem filtragem por outcome.
+`docs/analysis-core-contracts.md`, seção 3.1, é a fonte normativa da união
+fechada por-cue. Este módulo contém sua projeção executável imutável:
 
-`docs/analysis-core-contracts.md` (seção 3) já registra que `Occurrence`
-representa apenas o caso `found`, e que a distinção por-cue entre
-"sem match" e "falha de processamento" no nível de
-`Analysis.result_or_reference`/`structured_error` é escopo do M3-05, não
-desta issue. Este módulo não inventa uma política de conversão para esse
-nível: `MatchResult` é, por si só, a representação mínima que já contém
-tudo que a issue formal exige expor (outcome, configuração, score/timestamp
-quando aplicável, e `reason` para os casos degenerados) sem propor uma
-segunda forma de resultado concorrente com a que M3-05 ainda vai definir.
-A conversão de `dict[str, MatchResult]` para `Occurrence`/`structured_error`
-reais permanece, portanto, deliberadamente não implementada aqui.
+- `CueOccurrences(kind="occurrences", occurrences=(...))` para `FOUND`;
+- `CueNoMatch(kind="no_match")` para `NO_MATCH`;
+- `CueFailure(kind="failure", category=..., message=...)` para
+  `INVALID_INPUT` e `PROCESSING_FAILURE`.
+
+As três formas não se sobrepõem. `CueOccurrences` valida no construtor que
+sua coleção tem pelo menos um item; zero occurrences não representa
+no-match nem falha. O produtor atual cria exatamente uma `Occurrence` para
+`FOUND`, preservando a política `0..1` de M3-04, embora o contrato aceite
+`1..N` na variante matched para evolução futura.
+
+O mapeamento de Infrastructure para Core é explícito:
+
+| Resultado M2 | Variante M3-05 | Observação |
+|---|---|---|
+| `FOUND` | `CueOccurrences` | Copia timestamp, score e método; `end` permanece ausente para o método atual. |
+| `NO_MATCH` | `CueNoMatch` | Diagnósticos do candidato rejeitado não são promovidos a occurrence. |
+| `INVALID_INPUT` | `CueFailure(invalid_input)` | Depois da validação única do source, representa entrada inválida da cue. |
+| `PROCESSING_FAILURE` | `CueFailure(matching_failure)` | Usa mensagem segura e não propaga detalhe bruto da exceção. |
+
+Assim, o enum `MatchOutcome` continua sendo detalhe de Infrastructure.
+Application o converte, mas não muda o resultado do matcher nem reaplica o
+threshold.
+
+### 3.1. Ownership de falhas compartilhadas e por-cue
+
+O source compartilhado é validado uma vez antes do loop. Entrada inválida
+nesse source levanta `AnalysisSourceInputError(category=invalid_input)` e
+não é duplicada como uma falha para cada cue.
+
+Falhas de mídia, decode ou canonicalização que ocorram antes desta função
+receber arrays já canônicos pertencem ao asset que falhou: source
+compartilhado no escopo da Analysis; asset isolado de cue no escopo daquela
+cue. Falha de matching retornada por uma invocação de `match_cue` pertence à
+cue correspondente. Persistência nunca é outcome por-cue. Limitação de
+recursos e falha interna só são por-cue quando isoladas e atribuíveis; caso
+contrário permanecem no escopo da Analysis.
+
+Esta regra define ownership, não agregação: decidir como uma falha por-cue
+afeta `Analysis.state` ou o documento externo é responsabilidade de M3-06.
 
 ## 4. Configuração Lida Uma Vez por Analysis (Decisão G7)
 
@@ -125,8 +155,7 @@ uma única vez, por dois motivos:
 controlados (sem mídia representativa ao vivo):
 
 - uma Analysis com mais de uma cue produzindo um conjunto coerente de
-  outcomes por cue, incluindo pelo menos um `FOUND` e um outcome não-`FOUND`
-  (critério de aceite 5 da issue formal);
+  variantes explícitas por cue;
 - atribuição por `cue_id` correta independentemente da ordem de entrada das
   cues;
 - `match_cue` invocado exatamente uma vez por cue, nunca mais (critério de
@@ -137,6 +166,11 @@ controlados (sem mídia representativa ao vivo):
   (risco de execução de severidade alta do estado operacional);
 - nenhum outcome por cue é descartado silenciosamente, incluindo
   `INVALID_INPUT`;
+- uma Analysis mista preserva simultaneamente `CueNoMatch` para uma cue e
+  `CueFailure(matching_failure)` para outra, sem carregar detalhe bruto;
+- `CueOccurrences` rejeita uma coleção vazia;
+- source compartilhado inválido é rejeitado uma vez antes de qualquer
+  chamada ao matcher, em vez de ser copiado para todas as cues;
 - um mapeamento de cues vazio levanta `ValueError` em vez de produzir um
   resultado vazio silencioso;
 - o caso degenerado de uma única cue permanece uma Analysis válida.
@@ -149,9 +183,8 @@ controlados (sem mídia representativa ao vivo):
 - Execução paralela ou assíncrona de cues; `run_multi_cue_analysis` processa
   as cues sequencialmente, sem concorrência.
 - Política de seleção/deduplicação de múltiplas occurrences por cue (M3-04).
-- A distinção por-cue entre no-match e falha de processamento no nível de
-  `Analysis.result_or_reference`/`structured_error`, além do que
-  `MatchResult` já expõe (M3-05).
+- Agregação das variantes por-cue em lifecycle final ou no Analysis Result
+  versionado (M3-06).
 - API REST, WebUI, ou persistência de estado de orquestração.
 - O schema versionado de Analysis Result e sua serialização (M3-06).
 - Canonicalização de áudio: `source` e cada cue em `cues` devem já
@@ -161,9 +194,8 @@ controlados (sem mídia representativa ao vivo):
 ## Referências
 
 - `docs/analysis-core-contracts.md` -- contratos de `Analysis`, `Cue` e
-  `Occurrence` (M3-01), incluindo a reserva explícita da distinção
-  no-match/falha para M3-05 e da política de múltiplas occurrences para
-  M3-04 que este módulo preserva.
+  `Occurrence` (M3-01) e contrato normativo `PerCueOutcome` (M3-05),
+  incluindo a união fechada, categorias de falha e ownership.
 - `docs/analysis-effective-configuration.md` -- `EffectiveConfigurationSnapshot`
   e o princípio de captura no ponto de uso (M3-02) que a decisão G7 acima
   estende ao consumo da configuração.
@@ -172,6 +204,8 @@ controlados (sem mídia representativa ao vivo):
 - `src/audio_cue_locator/infrastructure/acoustic_matching/baseline.py` --
   `match_cue`, `EffectiveConfiguration`, `MatchResult`, `MatchOutcome`
   (M2-02), reutilizados sem modificação por este módulo.
+- `docs/occurrence-temporal-semantics-and-policy.md` -- coleção conceitual
+  `0..N`, produtor atual `0..1` e `end` ausente para o método atual.
 - `intents/M3/M3-03/implementation-handoff.json` -- escopo autorizado,
   decisões já fixadas (reutilização do matcher, leitura de configuração a
   partir da Analysis, agregação por `cue_id`) e lacunas G1/G2/G7 que este

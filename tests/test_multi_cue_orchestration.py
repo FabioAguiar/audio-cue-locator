@@ -3,25 +3,33 @@
 These validate the M3-03 acceptance criteria that can be checked on
 controlled/synthetic examples, without live representative media: an
 Analysis with more than one cue produces a coherent, cue_id-attributed set
-of per-cue outcomes (`MatchResult`); `match_cue` is invoked exactly once per
+of explicit Core outcome variants; `match_cue` is invoked exactly once per
 cue, against the shared source, with the caller-supplied
 `EffectiveConfiguration` -- never a module-level default -- passed through
 unchanged; no cue outcome is silently dropped, regardless of its
-`MatchOutcome`; and an empty Analysis (no cues) is rejected rather than
-silently producing an empty result (`docs/multi-cue-orchestration.md`;
-`docs/analysis-core-contracts.md`).
+`MatchOutcome`; no-match remains distinct from structured technical
+failure; an occurrences branch cannot be empty; shared-source invalidity is
+reported once before cue iteration; and an empty Analysis (no cues) is
+rejected rather than silently producing an empty result
+(`docs/multi-cue-orchestration.md`; `docs/analysis-core-contracts.md`).
 """
 
 import numpy as np
 import pytest
 
 from audio_cue_locator.application.multi_cue_orchestration import (
+    AnalysisSourceInputError,
+    CueFailure,
+    CueNoMatch,
+    CueOccurrences,
+    FailureCategory,
     run_multi_cue_analysis,
 )
 from audio_cue_locator.infrastructure.acoustic_matching import (
     DEFAULT_CONFIGURATION,
     EffectiveConfiguration,
     MatchOutcome,
+    MatchResult,
 )
 
 
@@ -71,10 +79,14 @@ def test_two_or_more_cues_produce_a_coherent_set_of_per_cue_outcomes():
     )
 
     assert set(results.keys()) == {"cue-found", "cue-no-match", "cue-invalid"}
-    assert results["cue-found"].outcome is MatchOutcome.FOUND
-    assert results["cue-found"].score == pytest.approx(1.0, abs=1e-6)
-    assert results["cue-no-match"].outcome is MatchOutcome.NO_MATCH
-    assert results["cue-invalid"].outcome is MatchOutcome.INVALID_INPUT
+    assert isinstance(results["cue-found"], CueOccurrences)
+    assert len(results["cue-found"].occurrences) == 1
+    assert results["cue-found"].occurrences[0].score == pytest.approx(
+        1.0, abs=1e-6
+    )
+    assert isinstance(results["cue-no-match"], CueNoMatch)
+    assert isinstance(results["cue-invalid"], CueFailure)
+    assert results["cue-invalid"].category is FailureCategory.INVALID_INPUT
 
 
 def test_cue_id_attribution_matches_the_originating_cue_not_input_order():
@@ -89,8 +101,9 @@ def test_cue_id_attribution_matches_the_originating_cue_not_input_order():
         configuration=DEFAULT_CONFIGURATION,
     )
 
-    assert results["cue-a"].outcome is MatchOutcome.FOUND
-    assert results["cue-b"].outcome is MatchOutcome.NO_MATCH
+    assert isinstance(results["cue-a"], CueOccurrences)
+    assert results["cue-a"].occurrences[0].cue_id == "cue-a"
+    assert isinstance(results["cue-b"], CueNoMatch)
 
 
 def test_match_cue_is_invoked_exactly_once_per_cue(monkeypatch):
@@ -134,8 +147,10 @@ def test_configuration_used_is_the_one_supplied_not_a_module_level_default():
         configuration=custom_configuration,
     )
 
-    assert results["cue-found"].configuration == custom_configuration
-    assert results["cue-found"].configuration != DEFAULT_CONFIGURATION
+    assert isinstance(results["cue-found"], CueOccurrences)
+    occurrence = results["cue-found"].occurrences[0]
+    assert occurrence.matching_method == custom_configuration.method
+    assert occurrence.matching_method != DEFAULT_CONFIGURATION.method
 
 
 def test_no_cue_outcome_is_silently_dropped_regardless_of_match_outcome():
@@ -152,12 +167,76 @@ def test_no_cue_outcome_is_silently_dropped_regardless_of_match_outcome():
     )
 
     assert len(results) == 3
-    outcomes = {cue_id: result.outcome for cue_id, result in results.items()}
+    outcomes = {cue_id: result.kind for cue_id, result in results.items()}
     assert outcomes == {
-        "cue-found": MatchOutcome.FOUND,
-        "cue-no-match": MatchOutcome.NO_MATCH,
-        "cue-invalid": MatchOutcome.INVALID_INPUT,
+        "cue-found": "occurrences",
+        "cue-no-match": "no_match",
+        "cue-invalid": "failure",
     }
+
+
+def test_no_match_and_technical_failure_remain_distinct_in_one_analysis(
+    monkeypatch,
+):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    def _controlled_result(source, cue, configuration):
+        if cue is _NO_MATCH_CUE:
+            return MatchResult(
+                outcome=MatchOutcome.NO_MATCH,
+                configuration=configuration,
+                diagnostic_best_timestamp_seconds=0.0,
+                diagnostic_best_score=0.1,
+            )
+        return MatchResult(
+            outcome=MatchOutcome.PROCESSING_FAILURE,
+            configuration=configuration,
+            reason="raw internal detail must not cross the Core boundary",
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue", _controlled_result)
+
+    results = orchestration.run_multi_cue_analysis(
+        _shared_source(),
+        cues={
+            "cue-absent": _NO_MATCH_CUE,
+            "cue-failed": _FOUND_CUE,
+        },
+        configuration=DEFAULT_CONFIGURATION,
+    )
+
+    assert isinstance(results["cue-absent"], CueNoMatch)
+    assert isinstance(results["cue-failed"], CueFailure)
+    assert results["cue-failed"].category is FailureCategory.MATCHING_FAILURE
+    assert "raw internal detail" not in results["cue-failed"].message
+
+
+def test_occurrences_variant_rejects_an_empty_collection():
+    with pytest.raises(ValueError, match="at least one occurrence"):
+        CueOccurrences(occurrences=())
+
+
+def test_invalid_shared_source_is_reported_once_before_cue_iteration(monkeypatch):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    calls = 0
+
+    def _unexpected_call(source, cue, configuration):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("match_cue must not run for an invalid shared source")
+
+    monkeypatch.setattr(orchestration, "match_cue", _unexpected_call)
+
+    with pytest.raises(AnalysisSourceInputError) as captured:
+        orchestration.run_multi_cue_analysis(
+            np.array([1.0], dtype=np.float64),
+            cues={"cue-a": _FOUND_CUE, "cue-b": _NO_MATCH_CUE},
+            configuration=DEFAULT_CONFIGURATION,
+        )
+
+    assert captured.value.category is FailureCategory.INVALID_INPUT
+    assert calls == 0
 
 
 def test_empty_cues_raises_value_error_instead_of_an_empty_result():
@@ -177,4 +256,4 @@ def test_single_cue_analysis_is_a_valid_degenerate_case():
     )
 
     assert set(results.keys()) == {"only-cue"}
-    assert results["only-cue"].outcome is MatchOutcome.FOUND
+    assert isinstance(results["only-cue"], CueOccurrences)

@@ -2,10 +2,11 @@
 
 ## Finalidade
 
-Este documento define o contrato interno do Core para `Analysis`, `Cue` e
-`Occurrence` (M3-01): a forma conceitual de cada tipo, os estados de
-lifecycle de `Analysis`, e a fronteira que os mantém independentes de
-Infrastructure. Ele existe para que multi-cue orchestration (M3-03),
+Este documento define o contrato interno do Core para `Analysis`, `Cue`,
+`Occurrence` e `PerCueOutcome` (M3-01/M3-05): a forma conceitual de cada
+tipo, os estados de lifecycle de `Analysis`, e a fronteira que os mantém
+independentes de Infrastructure. Ele existe para que multi-cue
+orchestration (M3-03),
 occurrence/multiple-occurrence policy (M3-04), effective-configuration
 traceability (M3-02), a distinção por-cue entre no-match e falha (M3-05) e
 o Analysis Result versionado com sua serialização (M3-06) possam depender
@@ -28,7 +29,8 @@ matching paralela ou duplicada.
 ```text
 Core (este documento)
   Analysis --- cues: list[Cue]
-  Analysis --- result_or_reference: list[Occurrence] | ErrorInfo | None
+  Analysis --- per_cue_outcomes: map[cue_id, PerCueOutcome]
+  PerCueOutcome = CueOccurrences | CueNoMatch | CueFailure
       |
       | reused per cue, unmodified (M3-01 constraint)
       v
@@ -47,7 +49,7 @@ formas de Infrastructure (docs/architecture.md, Princípio 1: "O Core não
 conhece interfaces externas"). A seção 6 declara, em vez disso, uma
 compatibilidade estrutural explícita: os campos de `Analysis` e
 `Occurrence` abaixo devem ser populáveis a partir dessas formas por uma
-camada de conversão fora do Core (Application, em uma issue futura), sem
+camada de conversão fora do Core (Application), sem
 que o Core precise importar `numpy`, `FFmpeg`, SQLite, filesystem, FastAPI
 ou Pydantic-como-transporte para isso.
 
@@ -65,8 +67,9 @@ Representa uma solicitação de localização acústica (docs/architecture.md,
 | `effective_configuration` | O método de matching e seus parâmetros efetivamente usados para esta Analysis (ex.: identificador do método e threshold de aceitação), sem fixar sua forma numérica interna — rastreabilidade de configuração completa é escopo de M3-02. |
 | `lifecycle_timestamps` | Marcações de quando a Analysis entrou em cada estado observado (por exemplo, enfileiramento e conclusão); não implica scheduling nem persistência. |
 | `method_or_configuration` | Identificador do método de matching usado (ex.: `"normalized_cross_correlation_v1"`), mantido junto de `effective_configuration` para permitir rastrear qual matcher produziu o resultado. |
-| `result_or_reference` | O resultado da Analysis quando `SUCCEEDED` — uma coleção de `Occurrence` (seção 3), uma por cue processada com sucesso — ou uma referência a esse resultado quando ele não é mantido inline; nunca ambos ausentes quando `state == SUCCEEDED`. |
-| `structured_error` | Erro estruturado (não uma string livre) quando `state == FAILED`; ausente nos demais estados. |
+| `per_cue_outcomes` | Mapeamento completo de `cue_id` para exatamente um `PerCueOutcome` (seção 3.1) por cue quando o processamento por-cue foi realizado. Nenhuma cue processada pode ser omitida. |
+| `result_or_reference` | Resultado externo ou referência quando disponível. Sua forma versionada e serialização pertencem a M3-06; não é usado para inferir a distinção por-cue. |
+| `structured_error` | Erro estruturado de escopo da Analysis/source quando o processamento compartilhado não pode prosseguir; não substitui nem agrega os outcomes independentes das cues. |
 
 `Analysis` não define como `source_asset`, `effective_configuration` ou
 `structured_error` são serializados ou persistidos — isso é explicitamente
@@ -107,13 +110,72 @@ Representa uma localização produzida pelo matcher para uma cue específica
 | `score` | Valor de similaridade específico do método usado — nunca confidence calibrada (docs/architecture.md, Princípio 5; `docs/matching-contract.md`, seção 4). Este documento herda essa política; não a redefine. |
 | `matching_method` | Identificador estável do método que produziu esta Occurrence (ex.: `"normalized_cross_correlation_v1"`), correspondente a `effective_configuration` da Analysis correspondente. |
 
-`Occurrence` representa apenas o caso de match encontrado (`found`); os
-casos `no_match`, `invalid_input` e `processing_failure` do matcher de
-cue única (M2-02) não produzem uma `Occurrence` para aquela cue — a
-distinção por-cue entre "sem match" e "falha de processamento" no nível de
-`Analysis.result_or_reference`/`structured_error` é escopo de M3-05, não
-deste documento. Múltiplas `Occurrence` por cue (política de múltiplas
-occurrences) são escopo de M3-04.
+`Occurrence` representa apenas match aceito (`found`). `no_match`,
+`invalid_input` e `processing_failure` não produzem `Occurrence`. A
+coleção conceitual admite múltiplas occurrences, mas o produtor atual gera
+`0..1` por cue, conforme `docs/occurrence-temporal-semantics-and-policy.md`;
+esta issue não muda seleção, deduplicação ou semântica temporal.
+
+## 3.1. `PerCueOutcome`: união fechada e exclusiva
+
+`PerCueOutcome` é o contrato normativo do Core para o resultado independente
+de cada cue. Ele é uma união tagged fechada com exatamente três variantes:
+
+| `kind` | Forma | Invariante |
+|---|---|---|
+| `occurrences` | `CueOccurrences(occurrences: tuple[Occurrence, ...])` | A coleção contém **uma ou mais** occurrences. Vazio é inválido. |
+| `no_match` | `CueNoMatch` | Conclusão legítima do matching sem occurrence aceita; não contém falha nem occurrence. |
+| `failure` | `CueFailure(category, message)` | Falha técnica estruturada atribuível à cue; não contém occurrences e não equivale a no-match. |
+
+As classes imutáveis em
+`src/audio_cue_locator/application/multi_cue_orchestration.py` são a projeção
+executável desse contrato. A semântica nasce aqui no Core; Application apenas
+mapeia o `MatchResult` existente e preserva a atribuição `cue_id -> outcome`.
+
+Regras obrigatórias:
+
+- toda cue processada aparece exatamente uma vez no mapeamento de outcomes;
+- as variantes são mutuamente exclusivas pelo campo `kind` e pela forma;
+- `CueOccurrences(())` é inválido, não um alias para `no_match`;
+- diagnósticos de candidato rejeitado de M2 não são occurrences;
+- `CueFailure.message` é não vazia, sanitizada e não expõe detalhes
+  sensíveis do host;
+- a forma é independente de FastAPI, Pydantic de transporte, SQLite,
+  filesystem, FFmpeg e detalhes NumPy.
+
+### Categorias de falha e ownership
+
+M3-05 não cria categorias. Os identificadores abaixo são projeções estáveis
+das categorias já enumeradas em `docs/architecture.md`, seção
+"Rastreabilidade de falhas":
+
+| Categoria da arquitetura | Identificador estável | Ownership |
+|---|---|---|
+| entrada inválida | `invalid_input` | Por-cue quando a entrada inválida pertence à cue; source/configuração compartilhados permanecem no escopo da Analysis. |
+| mídia não suportada | `unsupported_media` | Por-cue somente quando o asset da cue falha isoladamente; no source compartilhado é Analysis-scoped. |
+| falha de decode/canonicalização | `decode_or_canonicalization_failure` | Por-cue somente para processamento isolado do asset da cue; no source compartilhado é Analysis-scoped. |
+| falha de matching | `matching_failure` | Por-cue quando uma invocação do matcher falha para aquela cue. |
+| limitação de recursos | `resource_limit` | Por-cue apenas quando isolada e atribuível a uma cue; se interrompe o trabalho compartilhado, é Analysis-scoped. |
+| persistência | — | Sempre fora do outcome por-cue deste contrato; pertence à persistência do resultado/Analysis. |
+| falha interna | `internal_failure` | Por-cue apenas quando a falha é isolada e atribuível; caso contrário, é Analysis-scoped. |
+
+Uma falha ocorrida antes de existir trabalho independente por cue não deve ser
+copiada para todas as cues. Em particular, falha do source compartilhado é
+registrada uma vez no escopo da Analysis. A escolha de como esse erro ou o
+conjunto de outcomes determina o lifecycle final e o documento externo
+permanece reservada a M3-06.
+
+### Mapeamento do matcher M2
+
+Depois de validar o source compartilhado uma vez, Application mapeia cada
+`MatchResult` sem alterar o matcher ou a política de aceitação:
+
+| `MatchOutcome` de M2 | `PerCueOutcome` |
+|---|---|
+| `FOUND` | `CueOccurrences` com a occurrence aceita; `end=None` para o método atual. |
+| `NO_MATCH` | `CueNoMatch`; score/timestamp diagnósticos não viram occurrence. |
+| `INVALID_INPUT` | `CueFailure(category=invalid_input)`. |
+| `PROCESSING_FAILURE` | `CueFailure(category=matching_failure)`, com mensagem segura em vez do erro bruto. |
 
 ## 4. Estados de Lifecycle da `Analysis`
 
@@ -130,10 +192,9 @@ QUEUED -> RUNNING -> SUCCEEDED
   processamento; nenhuma cue foi ainda avaliada pelo matcher.
 - **`RUNNING`**: o processamento por cue está em andamento; `cues` é
   imutável neste ponto, mas `result_or_reference` ainda não está completo.
-- **`SUCCEEDED`**: todas as cues foram processadas e
-  `result_or_reference` está presente (uma `Occurrence`, ou sua ausência
-  explícita por cue, dependendo da política de M3-04/M3-05 que este
-  documento não define). `structured_error` está ausente.
+- **`SUCCEEDED`**: todas as cues foram processadas e seus outcomes
+  independentes estão presentes. M3-05 não decide se uma `CueFailure`
+  permite este estado; essa agregação pertence a M3-06.
 - **`FAILED`**: o processamento não pôde concluir de forma válida;
   `structured_error` está presente e descreve a falha.
 
@@ -147,8 +208,8 @@ significa distribuído").
 
 ## 5. Fronteira do Core (Independência de Infrastructure)
 
-Nenhum dos três tipos acima — `Analysis`, `Cue`, `Occurrence` — importa ou
-requer, direta ou indiretamente:
+Nenhum dos contratos acima — `Analysis`, `Cue`, `Occurrence` ou
+`PerCueOutcome` — importa ou requer, direta ou indiretamente:
 
 - FastAPI ou qualquer framework HTTP;
 - Pydantic usado como schema de transporte;
@@ -175,20 +236,22 @@ nesta issue:
 | `Occurrence.matching_method` | `EffectiveConfiguration.method` | `baseline.py` (M2-02) |
 | `Occurrence.temporal_position` | `MatchResult.timestamp_seconds` | `baseline.py` (M2-02) |
 | `Analysis.method_or_configuration` | `EffectiveConfiguration` (`method`, `acceptance_threshold`) | `baseline.py` (M2-02), reutilizado sem modificação por `acceptance.py` (M2-05) |
-| `Analysis.structured_error` (quando aplicável por cue) | `MatchResult.reason`, presente para `invalid_input` e `processing_failure` | `baseline.py` (M2-02) |
+| `CueOccurrences` | `MatchOutcome.FOUND`, `timestamp_seconds` e `score` | `baseline.py` (M2-02), projetado por Application |
+| `CueNoMatch` | `MatchOutcome.NO_MATCH` | `baseline.py` (M2-02), sem promover diagnósticos |
+| `CueFailure(category=invalid_input)` | `MatchOutcome.INVALID_INPUT` para entrada da cue | `baseline.py` (M2-02), após validar o source compartilhado |
+| `CueFailure(category=matching_failure)` | `MatchOutcome.PROCESSING_FAILURE` | `baseline.py` (M2-02), com mensagem segura |
 | `Analysis.source_asset` / `Cue.asset_reference` | Áudio já em conformidade com `CanonicalAudioSpec` (`sample_rate_hz=48000`, `channels=1`, `sample_format="float32"`, normalização de pico) | `canonical_audio.py` (M1-03) |
 
-O mapeamento explícito acima é o que permite a M3-02 através de M3-06
-depender destes três contratos sem re-inspecionar `baseline.py`,
-`acceptance.py` ou `canonical_audio.py` para descobrir a forma correta —
-mas a conversão efetiva entre as formas de Infrastructure e estas de Core
-(por exemplo, agregar múltiplos `MatchResult` em `Analysis.result_or_reference`)
-não é implementada por este documento; ela pertence a uma camada de
-Application futura, fora do escopo de M3-01.
+O mapeamento explícito acima permite a M3-02 através de M3-06 depender
+destes contratos sem re-inspecionar `baseline.py`, `acceptance.py` ou
+`canonical_audio.py`. A projeção por-cue é implementada em Application por
+`run_multi_cue_analysis`; a agregação em `Analysis.result_or_reference`
+continua reservada a M3-06.
 
-`MatchOutcome.FOUND`, `NO_MATCH`, `INVALID_INPUT` e `PROCESSING_FAILURE`
-(`baseline.py`) permanecem exclusivos de Infrastructure; este documento não
-os importa nem os redefine no Core.
+`MatchOutcome.FOUND`, `NO_MATCH`, `INVALID_INPUT` e
+`PROCESSING_FAILURE` permanecem exclusivos de Infrastructure. O Core não
+os importa nem os redefine; Application os converte para a união da seção
+3.1.
 
 ## 7. Fora de Escopo Deste Documento
 
@@ -199,8 +262,8 @@ os importa nem os redefine no Core.
 - O schema versionado de Analysis Result e sua serialização JSON (M3-06).
 - Rastreabilidade completa de configuração efetiva além de nomear o campo
   (M3-02).
-- Distinção detalhada por-cue entre no-match e falha de processamento além
-  do que `structured_error`/`MatchResult.reason` já expõem (M3-05).
+- Agregação dos outcomes por-cue em estado final ou documento externo
+  (M3-06).
 - API REST, WebUI, autenticação ou execução assíncrona.
 - Qualquer implementação numérica de matching, calibração de threshold, ou
   uma pipeline de matching paralela/duplicada ao matcher single-cue
@@ -212,13 +275,17 @@ os importa nem os redefine no Core.
 
 - **G1 (forma exata dos campos):** os nomes de campo usados nas seções
   1–3 (`analysis_id`, `source_asset`, `effective_configuration`,
-  `method_or_configuration`, `result_or_reference`, `structured_error`,
+  `method_or_configuration`, `per_cue_outcomes`, `result_or_reference`,
+  `structured_error`,
   `cue_id`, `asset_reference`, `presentation_metadata`,
   `temporal_position`, `matching_method`) são a decisão de nomenclatura
   deste documento, derivada diretamente das listas de campos da issue
   formal (seção 4) e da compatibilidade declarada na seção 6 acima; eles
   ainda não foram implementados como tipos Python e podem ser ajustados
   por revisão explícita antes de M3-02 depender deles.
+- **M3-05 (outcome por-cue):** resolvido pela seção 3.1. A união
+  `CueOccurrences | CueNoMatch | CueFailure` e sua projeção executável são
+  estáveis; agregação e serialização continuam reservadas a M3-06.
 - **G2 (local do documento):** confirmado neste handoff — nenhum
   documento equivalente já existente em `docs/` cobria este escopo;
   `docs/analysis-core-contracts.md` é a localização definitiva.
