@@ -1,24 +1,31 @@
 """Interfaces (REST API): the versioned FastAPI application assembly for
-`/api/v1` (M5-01).
+`/api/v1` (M5-01), now also installing the centralized v1 error-
+translation policy (M5-02).
 
 This module owns exactly one route: a baseline health check proving the
 `/api/v1` namespace is live and OpenAPI-representable
 (`issues/M5/M5-01/formal-issue.json`, acceptance criteria 1 and 6). It does
-not define Asset upload, Analysis creation, status/result retrieval, or
-error-translation endpoints; those remain owned by M5-02 through M5-06
-(`docs/rest-api-v1-contract.md`). The Asset/Analysis transport schemas in
-`schemas.py` are registered into the generated OpenAPI document as
-components even though no route yet returns them, so the contract itself
-is reviewable and OpenAPI-representable ahead of the endpoints that will
-use it.
+not define Asset upload, Analysis creation, or status/result retrieval
+endpoints; those remain owned by M5-03 through M5-05
+(`docs/rest-api-v1-contract.md`). The Asset/Analysis/Error transport
+schemas in `schemas.py` are registered into the generated OpenAPI document
+as components even though no business route yet returns them, so the
+contract itself is reviewable and OpenAPI-representable ahead of the
+endpoints that will use it.
+
+`create_app()` registers `errors.install_error_handlers` so every current
+and future `/api/v1` route -- not only the ones this module defines --
+inherits the same safe failure-translation policy without its own
+try/except (`issues/M5/M5-02/formal-issue.json`, acceptance criteria 1-3).
 
 Per `docs/architecture.md` ("O Core nao conhece interfaces externas";
 "REST API e quaisquer interfaces futuras devem invocar operacoes da camada
 Application"), this module must depend on Application only. It imports
 nothing from `audio_cue_locator.infrastructure`; the only Core/Application
-imports anywhere in this package are the mapping functions in
-`schemas.py`, and this module does not call them (there is no persisted
-Asset or Analysis to map yet -- the health route returns a plain literal).
+imports anywhere in this package are the mapping functions in `schemas.py`
+and the exception-type mapping in `errors.py`. This module itself does not
+call any of them (there is no persisted Asset or Analysis to map yet --
+the health route returns a plain literal).
 """
 
 from __future__ import annotations
@@ -28,12 +35,14 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from audio_cue_locator.interfaces.rest_api.errors import install_error_handlers
 from audio_cue_locator.interfaces.rest_api.schemas import (
     AnalysisCreateRequest,
     AnalysisPublic,
     AnalysisResultEnvelope,
     AssetCreateRequest,
     AssetPublic,
+    ErrorPublic,
 )
 
 API_VERSION = "v1"
@@ -44,20 +53,23 @@ V1_STATUS_CATALOG: dict[str, int] = {
     "accepted": 202,
     "no_content": 204,
     "bad_request": 400,
+    "payload_too_large": 413,
+    "unsupported_media_type": 415,
     "not_found": 404,
     "conflict": 409,
     "unprocessable_entity": 422,
     "internal_error": 500,
 }
 """The baseline HTTP status catalog reserved for the `/api/v1` namespace
-(`issues/M5/M5-01/formal-issue.json`, section 3). Only `"ok"` (200) is
-bound to an actual route by this issue (`get_health` below); the remaining
-entries are reserved names each later M5 endpoint issue (M5-02 through
-M5-06) must reuse rather than reinvent -- for example `"accepted"` (202)
-for the asynchronous-creation response `docs/architecture.md` documents
-under "Fluxo programatico" -- so the status vocabulary stays coherent
-across the whole namespace instead of each endpoint issue picking its own
-names for the same HTTP status."""
+(`issues/M5/M5-01/formal-issue.json`, section 3, extended by
+`issues/M5/M5-02/formal-issue.json`, section 4). Only `"ok"` (200) is
+bound to a business route by this issue (`get_health` below); the
+remaining entries -- including `"payload_too_large"` and
+`"unsupported_media_type"`, added by M5-02 for the size/quantity-limit and
+unsupported-media failure classes -- are bound to the centralized handlers
+`errors.install_error_handlers` registers below, so the status vocabulary
+stays coherent across the whole namespace instead of each endpoint issue
+picking its own names for the same HTTP status."""
 
 _TRANSPORT_SCHEMAS_FOR_OPENAPI = (
     AssetCreateRequest,
@@ -65,6 +77,7 @@ _TRANSPORT_SCHEMAS_FOR_OPENAPI = (
     AnalysisCreateRequest,
     AnalysisPublic,
     AnalysisResultEnvelope,
+    ErrorPublic,
 )
 
 
@@ -84,6 +97,7 @@ def create_app() -> FastAPI:
         docs_url=f"{API_V1_PREFIX}/docs",
         redoc_url=None,
     )
+    install_error_handlers(app)
 
     @app.get(
         f"{API_V1_PREFIX}/health",

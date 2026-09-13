@@ -296,3 +296,45 @@ class AnalysisResultEnvelope(_ForbidExtraModel):
             "core.analysis_result.to_canonical_dict; not re-typed here."
         ),
     )
+
+
+# --- Error envelope (shared v1 external failure contract, M5-02) -----------
+
+
+class ErrorCode(str, Enum):
+    """The stable, closed v1 error-code catalog (`issues/M5/M5-02/formal-
+    issue.json`, acceptance criteria 1-2). Every `/api/v1` failure
+    response carries exactly one of these codes; the set is additive-only
+    -- an existing member is never renamed or repurposed. The mapping from
+    a caught exception to one of these codes lives in
+    `interfaces.rest_api.errors`, not here."""
+
+    VALIDATION_ERROR = "validation_error"
+    UNSUPPORTED_MEDIA = "unsupported_media"
+    RESOURCE_LIMIT_EXCEEDED = "resource_limit_exceeded"
+    RESOURCE_NOT_FOUND = "resource_not_found"
+    LIFECYCLE_CONFLICT = "lifecycle_conflict"
+    ANALYSIS_FAILED = "analysis_failed"
+    INTERNAL_ERROR = "internal_error"
+
+
+class ErrorPublic(_ForbidExtraModel):
+    """The one external v1 Error envelope every `/api/v1` failure response
+    uses (acceptance criterion 1). Distinct in purpose from
+    `AnalysisStructuredError` above: that type is a persisted Analysis's
+    own `structured_error` field on a successful 200 `AnalysisPublic`
+    response, while this type is the body of a non-2xx HTTP response
+    describing the *request's* own outcome. The two are never conflated or
+    interchanged (`interfaces.rest_api.errors` module docstring).
+
+    `message` is always one of a small, fixed set of safe per-`error_code`
+    strings (`interfaces.rest_api.errors.SAFE_MESSAGES`) -- never a raw
+    exception message, stack trace, host path, or echoed request value.
+    `correlation_id` is a random, non-guessable identifier a client can
+    report back for operator diagnosis without the response itself
+    disclosing anything about the underlying cause (acceptance criterion
+    5)."""
+
+    error_code: ErrorCode
+    message: str = Field(..., min_length=1)
+    correlation_id: str = Field(..., min_length=1)
