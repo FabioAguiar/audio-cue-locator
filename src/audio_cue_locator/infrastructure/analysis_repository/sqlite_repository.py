@@ -55,6 +55,14 @@ open by the M4-03 issue operational state
 - **SQL safety.** Every statement below is a parameterized query
   (`?` placeholders); no value is ever interpolated into SQL text.
 
+`list_by_state` (M4-05) is a later addition, not part of the original M4-03
+schema decisions above: a plain `SELECT ... WHERE state = ?` against the
+existing `state` column, requiring no new table or column. It resolves the
+M4-05 startup-recovery discovery gap
+(`states/M4/M4-05/issue-operational-state.json`, gap G-01) while keeping
+every enumeration query, like every other query in this module, confined to
+this one adapter.
+
 Out of scope, unchanged from the port module: cancellation, a local
 executor, REST/WebUI exposure, a broker, distributed workers, and remote or
 object storage (`issues/M4/M4-03/formal-issue.json`, section 4).
@@ -242,9 +250,9 @@ class SQLiteAnalysisRepository:
     """SQLite-backed implementation of `AnalysisRepositoryPort`.
 
     Structurally satisfies the `AnalysisRepositoryPort` Protocol (`create`,
-    `get`, `transition`); it does not import that Protocol as a base class,
-    matching how `core.asset.AssetStoragePort` is consumed elsewhere in
-    this codebase.
+    `get`, `transition`, `list_by_state`); it does not import that Protocol
+    as a base class, matching how `core.asset.AssetStoragePort` is consumed
+    elsewhere in this codebase.
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -393,6 +401,15 @@ class SQLiteAnalysisRepository:
             raise
         self._connection.execute("COMMIT")
         return new_record
+
+    def list_by_state(
+        self, state: AnalysisLifecycleState
+    ) -> tuple[AnalysisRecord, ...]:
+        rows = self._connection.execute(
+            f"SELECT {_SELECT_COLUMNS} FROM analyses WHERE state = ?",
+            (state.value,),
+        ).fetchall()
+        return tuple(self._row_to_record(row) for row in rows)
 
     def _row_to_record(self, row: tuple) -> AnalysisRecord:
         (

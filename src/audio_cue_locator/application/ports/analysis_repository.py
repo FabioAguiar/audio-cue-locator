@@ -42,6 +42,14 @@ media bytes or large blobs are all out of scope
 (`issues/M4/M4-03/formal-issue.json`, section 4, "Não inclui";
 `docs/architecture.md`, "Analysis Repository": "O banco não deve armazenar
 grandes blobs de mídia no baseline").
+
+`list_by_state` (M4-05) is this port's one discovery operation, added
+because a startup recovery routine cannot otherwise find which analyses
+were left `RUNNING` by a crash: no in-memory record of previously
+`RUNNING` `analysis_id` values survives a process restart
+(`states/M4/M4-05/issue-operational-state.json`, gap G-01). It is
+read-only and confined to the same no-SQL-in-Application boundary as
+every other method here.
 """
 
 from __future__ import annotations
@@ -315,5 +323,29 @@ class AnalysisRepositoryPort(Protocol):
         completely unchanged when this happens, so a rejected transition
         can never partially apply.
         """
+
+        ...
+
+    def list_by_state(
+        self, state: AnalysisLifecycleState
+    ) -> tuple[AnalysisRecord, ...]:
+        """Return every persisted Analysis currently in `state`, in no
+        particular order, or an empty tuple if none match.
+
+        A read-only query: it never mutates any persisted Analysis and,
+        unlike `get`, never raises `AnalysisNotFoundError` for an empty
+        result -- an empty tuple is itself the well-formed answer "no
+        Analysis is currently in this state".
+
+        Added for the M4-05 startup recovery routine
+        (`infrastructure/execution/restart_recovery.py`), which needs to
+        discover every Analysis left `RUNNING` after a process crash or
+        restart. No in-memory record of previously `RUNNING`
+        `analysis_id` values survives a crash, so recovery has no way to
+        find its targets except by querying persisted state directly
+        through this port (`states/M4/M4-05/issue-operational-state.json`,
+        gap G-01). This is the only method this port exposes for
+        discovering analyses by state; it does not add filtering by any
+        other field."""
 
         ...
