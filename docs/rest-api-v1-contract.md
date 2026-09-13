@@ -10,30 +10,37 @@ Asset and Analysis schemas, the `/api/v1` namespace, identifier and
 timestamp conventions, a baseline route and HTTP status catalog, explicit
 transport-to-Application mappings, and OpenAPI representability.
 
-The executable contract lives in two modules under
-`src/audio_cue_locator/interfaces/rest_api/`:
+The executable contract lives in these modules under
+`src/audio_cue_locator/interfaces/rest_api/` (plus one Application module):
 
 - `schemas.py` — the public Pydantic v1 request/response schemas for Asset,
   Analysis, and (M5-02) the shared Error envelope, plus one explicit
   mapping function per resource (`asset_to_public`,
   `analysis_record_to_public`).
 - `app.py` — the FastAPI application assembly: the `/api/v1` namespace
-  prefix, the baseline HTTP status catalog, one baseline health route, the
-  installation of the centralized error-translation policy (M5-02), and
-  the registration of every schema below into the generated OpenAPI
-  document.
+  prefix, the baseline HTTP status catalog, the baseline health route, the
+  installation of the centralized error-translation policy (M5-02), the
+  registration of every schema below into the generated OpenAPI document,
+  and (M5-03) the composition root that wires a concrete
+  `AssetStoragePort` implementation into the upload routes.
 - `errors.py` (M5-02) — the centralized v1 failure-translation policy:
   the closed exception-to-`ErrorCode`/HTTP-status mapping and
   `install_error_handlers`, which every current and future `/api/v1`
   route inherits.
+- `asset_routes.py` (M5-03) — the two bounded source-media/cue upload
+  routes (`build_asset_router`) and their own bounded-multipart-reading
+  mechanism; delegates all ingestion policy to Application.
+- `application/asset_ingestion.py` (M5-03) — the Application-level Asset
+  ingestion use case: explicit, configurable upload-size limits and
+  supported-media allowlists per logical Asset type, content-based
+  media-type detection, and delegation to the existing M4-02
+  `core.asset.AssetStoragePort`.
 
-M5-01 does **not** implement Asset upload behavior, Analysis creation,
-status/result retrieval, or centralized external error translation. Those
-remain owned by M5-03, M5-04, M5-05, and M5-02 respectively. M5-02 (below)
-implements the shared Error contract and its translation policy, but no
-route other than the baseline health check exists yet, so the policy is
-currently exercised only by request-validation failures FastAPI itself
-raises and by direct tests, not by any business endpoint.
+M5-01 does **not** implement Analysis creation or status/result retrieval;
+those remain owned by M5-04 and M5-05. M5-02 implements the shared Error
+contract and its translation policy. M5-03 implements the first two
+business routes that actually exercise it: bounded source-media and cue
+Asset uploads (see "Bounded source-media and cue uploads (M5-03)" below).
 
 ## Dependency direction
 
@@ -55,6 +62,22 @@ responsibility to translate into one of `errors.py`'s own exception types
 (`UnsupportedMediaError`, `ResourceLimitExceededError`,
 `AnalysisResultUnavailableError`) or into a persisted `StructuredError`
 before it ever reaches Interfaces.
+
+M5-03's `application/asset_ingestion.py` is one narrow, documented
+exception to the "no upward import" rule's naive reading: it cannot import
+anything under `interfaces/rest_api/` itself (`interfaces/rest_api/
+__init__.py` eagerly imports `app.py`, which must import
+`asset_ingestion.py` to build its composition root -- a genuine circular
+import, not only a layering concern), so it raises its own
+`AssetUploadTooLargeError`/`UnsupportedAssetMediaError` instead.
+`asset_routes.py` is the one place that translates those two into
+`errors.ResourceLimitExceededError`/`errors.UnsupportedMediaError` before
+they reach `errors.install_error_handlers`. Separately, `app.py` -- and
+only `app.py` -- also imports `infrastructure/asset_storage/
+local_filesystem_storage.py` directly, as this project's one composition
+root: the sole place a concrete `AssetStoragePort` implementation is
+constructed and injected into `AssetIngestionUseCase`. `asset_routes.py`
+itself never imports `infrastructure/`.
 
 ## `/api/v1` namespace and versioning independence
 
@@ -82,7 +105,9 @@ envelope yet; Result retrieval is M5-05's endpoint to define.
 
 | Route | Method | Status | Purpose |
 |---|---|---:|---|
-| `/api/v1/health` | GET | 200 | Baseline liveness check for the `/api/v1` namespace. The only route this issue defines. |
+| `/api/v1/health` | GET | 200 | Baseline liveness check for the `/api/v1` namespace (M5-01). |
+| `/api/v1/assets/source-media` | POST | 201 | Bounded source-media Asset upload (M5-03). |
+| `/api/v1/assets/cue` | POST | 201 | Bounded cue Asset upload (M5-03). |
 
 The complete baseline status catalog (`app.V1_STATUS_CATALOG`) reserves one
 name per HTTP status every later M5 endpoint issue must reuse rather than
@@ -91,23 +116,24 @@ reinvent:
 | Name | HTTP status | Reserved for |
 |---|---:|---|
 | `ok` | 200 | Synchronous success (bound to `/api/v1/health` today). |
+| `created` | 201 | A new resource was created (bound to both M5-03 upload routes). |
 | `accepted` | 202 | Asynchronous Analysis creation (`docs/architecture.md`, "Fluxo programatico": "202 Accepted + Analysis ID"); M5-04. |
 | `no_content` | 204 | A future successful request with no response body. |
 | `bad_request` | 400 | Domain-level invalid input caught by Core/Application (`InvalidAssetIdentifierError`, `InvalidAssetMetadataError`, `InvalidAnalysisRecordError`, `AnalysisSourceInputError`); bound by M5-02. |
-| `payload_too_large` | 413 | A size/quantity limit exceeded (`errors.ResourceLimitExceededError`); bound by M5-02. |
-| `unsupported_media_type` | 415 | Submitted media fails format/codec/audio-stream validation (`errors.UnsupportedMediaError`); bound by M5-02. |
+| `payload_too_large` | 413 | A size/quantity limit exceeded (`errors.ResourceLimitExceededError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.AssetUploadTooLargeError`). |
+| `unsupported_media_type` | 415 | Submitted media fails format/codec/audio-stream validation (`errors.UnsupportedMediaError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.UnsupportedAssetMediaError`). |
 | `not_found` | 404 | An Asset or Analysis identifier with no matching resource (`AssetNotFoundError`, `AnalysisNotFoundError`); bound by M5-02, used by M5-05. |
 | `conflict` | 409 | A state conflict: an Analysis lifecycle transition conflict, an already-existing Analysis identifier, an Asset storage collision, or a Result requested for a FAILED Analysis; bound by M5-02, used by M5-04. |
 | `unprocessable_entity` | 422 | Request-shape validation caught by FastAPI/Pydantic before Application runs (`RequestValidationError`); bound by M5-02. |
 | `internal_error` | 500 | Any unmapped/unexpected exception; bound by M5-02. |
 
-`ok` and every 4xx/5xx entry above are now bound to the centralized
+`ok`, `created`, and every 4xx/5xx entry above are bound to the centralized
 handlers `errors.install_error_handlers` registers on every `/api/v1`
-app instance (M5-02); no business route yet raises most of these
-exception types, since Asset upload, Analysis creation, and Result
-retrieval remain M5-03 through M5-05's endpoints to define, but the
-policy already applies to any request-validation failure FastAPI itself
-raises today.
+app instance (M5-02). M5-03's two upload routes are the first business
+routes to actually raise `payload_too_large`/`unsupported_media_type`;
+Analysis creation and Result retrieval remain M5-04/M5-05's endpoints to
+define, and the policy already applies to any request-validation failure
+FastAPI itself raises today regardless.
 
 ## Public Asset schema
 
@@ -129,10 +155,16 @@ documents it as an opaque internal reference that "Core and Application
 must not parse... as a filesystem path"; this contract does not promote it
 to a public field.
 
-`AssetCreateRequest` fixes only the client-supplied metadata a future
-upload endpoint (M5-03) will accept alongside the raw bytes: `logical_type`,
-`informative_name`, and `media_type`. The upload transport itself (how the
-bytes travel) is explicitly out of scope for this issue.
+`AssetCreateRequest` fixes the client-supplied metadata field names a JSON
+Asset representation would carry (`logical_type`, `informative_name`,
+`media_type`). M5-03's two multipart upload endpoints (below) do not
+actually bind a request body to this schema: `logical_type` is implied by
+which endpoint is called, `informative_name` comes from the multipart file
+part's own filename, and `media_type` is never accepted from the client at
+all (see "Bounded source-media and cue uploads"). `AssetCreateRequest`
+remains declared and OpenAPI-registered as the general-purpose Asset
+metadata shape M5-01 defined it as; M5-03 did not need to extend or repurpose
+it.
 
 ## Public Analysis schema
 
@@ -223,9 +255,84 @@ A route or its Application call must raise one of the exception types in
 the catalog above (or let `RequestValidationError` propagate from
 FastAPI/Pydantic's own request parsing) to go through this policy. Raising
 `fastapi.HTTPException` directly bypasses it entirely and is not used by
-any code in this package; a future M5-03/M5-04/M5-05 endpoint must raise
-the mapped exceptions above, not `HTTPException`, to stay within this
+any code in this package; M5-03's upload routes already follow this (see
+"Bounded source-media and cue uploads" below), and a future M5-04/M5-05
+endpoint must do the same, not raise `HTTPException`, to stay within this
 contract.
+
+## Bounded source-media and cue uploads (M5-03)
+
+`POST /api/v1/assets/source-media` and `POST /api/v1/assets/cue` each
+accept a `multipart/form-data` request carrying exactly one file part and
+return `AssetPublic` (201) on success. `logical_type` is implied by which
+endpoint was called, never a client-supplied value; `informative_name` is
+the multipart file part's own filename, sanitized by the existing
+`core.asset.sanitize_asset_name` exactly as any other Asset creation path;
+the internal identifier and storage location remain entirely server-
+generated (`docs/asset-identity-and-storage.md`), so two uploads sharing an
+identical client filename never collide.
+
+`media_type` is never accepted from a client-declared header or the
+filename: `docs/asset-identity-and-storage.md` requires it to be "the
+result of trusted media inspection", not "a filename extension alone".
+`application/asset_ingestion.py`'s `sniff_media_type` inspects the
+payload's own leading bytes for the two container signatures
+`infrastructure/media_processing/ffmpeg_adapter.py` already documents as
+this project's supported inputs (a RIFF/WAVE header for `audio/wav`, an ISO
+base media file format `ftyp` box for `video/mp4`); a full FFmpeg
+decode/stream probe remains out of this issue's scope and happens later, at
+Analysis creation (M5-04) and matching.
+
+### Explicit, configurable limits
+
+| Logical type | Endpoint | Default max size | Supported media types |
+|---|---|---:|---|
+| `source_media` | `/api/v1/assets/source-media` | 500 MiB | `audio/wav`, `video/mp4` |
+| `cue` | `/api/v1/assets/cue` | 50 MiB | `audio/wav` |
+
+Both defaults (`application/asset_ingestion.py`,
+`DEFAULT_MAX_SOURCE_MEDIA_UPLOAD_SIZE_BYTES` /
+`DEFAULT_MAX_CUE_UPLOAD_SIZE_BYTES`) are conservative, explicitly documented
+starting points, not a benchmarked ceiling -- no empirical upload-size
+usage evidence exists yet for this project. Each is independently
+overridable at process start through a non-secret environment variable read
+once by `interfaces/rest_api/app.py`'s composition root:
+`AUDIO_CUE_LOCATOR_MAX_SOURCE_MEDIA_UPLOAD_BYTES` and
+`AUDIO_CUE_LOCATOR_MAX_CUE_UPLOAD_BYTES`. The supported-media allowlists
+are fixed, not environment-configurable, in this issue.
+`AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT` (default `var/asset_storage`,
+relative to the process's working directory) configures
+`LocalFilesystemAssetStorage`'s base directory the same way.
+
+### Bounded ingestion before unsafe resource consumption
+
+`core.asset.AssetStoragePort.ingest(content: bytes, ...)` accepts only a
+complete, already-buffered payload and defines no chunked-read or size-
+limit primitive of its own. `asset_routes.py` therefore never uses
+FastAPI's `UploadFile = File(...)` parameter injection -- Starlette's own
+multipart parser would otherwise fully consume an arbitrarily large file
+part into a spooled temporary file before the route function even runs,
+since its `max_part_size` option bounds only non-file field values, not a
+file part's own bytes. Each route instead reads the raw request stream
+itself, enforcing the configured limit in two layers: a `Content-Length`
+pre-check (a cheap, immediate rejection for a client that honestly declares
+an oversized body) and an authoritative bounded-stream wrapper around
+`request.stream()` that raises the instant the limit is exceeded, covering
+an absent or dishonest `Content-Length` and chunked transfer encoding
+alike. Only once the total observed bytes are already known to be within
+the configured bound is the (now safely sized) buffered content handed to
+`starlette.formparsers.MultiPartParser` for parsing. A request rejected at
+either layer never reaches `AssetStoragePort.ingest`, so no partial or
+unowned bytes are ever written to storage.
+
+### Ownership after upload
+
+An Asset created by either endpoint is not yet owned by any Analysis
+(`docs/artifact-retention-and-cleanup-policy.md`, "Ownership model"): it
+becomes owned only once a future Analysis (M5-04) references it as
+`source_asset_id`, a `cues[].asset_id`, or through `owned_asset_ids`. This
+issue establishes no ownership or cleanup behavior of its own for an
+uploaded-but-never-consumed Asset.
 
 ## Identifier and timestamp conventions
 
@@ -244,19 +351,21 @@ contract.
 `app.create_app()` registers `AssetCreateRequest`, `AssetPublic`,
 `AnalysisCreateRequest`, `AnalysisPublic`, `AnalysisResultEnvelope`, and
 (M5-02) `ErrorPublic` (plus their nested enums/models) into the generated
-OpenAPI document's `components.schemas`, in addition to the one route
-this issue defines. This keeps the contract itself reviewable and
-renderable in OpenAPI ahead of the endpoints that will reference these
-schemas as their `response_model`/request body/error responses in M5-03
-through M5-06.
+OpenAPI document's `components.schemas`, alongside the three routes this
+project now defines (`/api/v1/health`, and M5-03's two upload routes). This
+keeps the contract itself reviewable and renderable in OpenAPI ahead of the
+endpoints that will reference these schemas as their `response_model`/
+request body/error responses in M5-04 through M5-06.
 
 ## Non-goals of this document
 
-This document does not define: Asset upload behavior (M5-03), Analysis
-creation orchestration (M5-04), or status/Result retrieval (M5-05). It
-does not certify that any of those endpoints exist; it fixes only the
-shared transport, versioning, and (as of M5-02) error-translation baseline
-they must build on. It also does not change Core matching or Analysis
-lifecycle semantics, log raw request bodies or exception payloads, or
-define authentication, authorization, quotas, TLS, or production CORS
-policy — all explicitly out of M5-02's scope.
+This document does not define: Analysis creation orchestration (M5-04) or
+status/Result retrieval (M5-05). It does not certify that either endpoint
+exists; it fixes only the shared transport, versioning, error-translation
+(M5-02), and bounded-upload (M5-03) baseline they must build on. It also
+does not change Core matching or Analysis lifecycle semantics, log raw
+request bodies or exception payloads, persist raw uploaded media as
+evidence, define authentication, authorization, quotas, TLS, or production
+CORS policy, or add resumable uploads, streaming analysis, object storage,
+or arbitrary/client-controlled destination paths — all explicitly out of
+M5-02's and M5-03's scope.
