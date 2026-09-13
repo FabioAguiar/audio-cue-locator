@@ -21,8 +21,11 @@ The executable contract lives in these modules under
   prefix, the baseline HTTP status catalog, the baseline health route, the
   installation of the centralized error-translation policy (M5-02), the
   registration of every schema below into the generated OpenAPI document,
-  and (M5-03) the composition root that wires a concrete
-  `AssetStoragePort` implementation into the upload routes.
+  (M5-03) the composition root that wires a concrete `AssetStoragePort`
+  implementation into the upload routes, and (M5-04) the second
+  composition-root responsibility that wires a concrete
+  `AnalysisRepositoryPort` and a `LocalAnalysisExecutor` into the Analysis
+  creation route.
 - `errors.py` (M5-02) — the centralized v1 failure-translation policy:
   the closed exception-to-`ErrorCode`/HTTP-status mapping and
   `install_error_handlers`, which every current and future `/api/v1`
@@ -35,12 +38,25 @@ The executable contract lives in these modules under
   supported-media allowlists per logical Asset type, content-based
   media-type detection, and delegation to the existing M4-02
   `core.asset.AssetStoragePort`.
+- `analysis_routes.py` (M5-04) — the asynchronous Analysis creation route
+  (`build_analysis_router`); delegates every validation, canonicalization,
+  and persistence/scheduling decision to Application.
+- `application/create_analysis.py` (M5-04) — the Application-level
+  asynchronous Analysis creation use case: cue-count validation, Asset
+  existence/content-compatibility checks, WAV/MP4-to-canonical-array
+  resolution, a default effective-configuration policy, a documented
+  no-idempotency baseline, and delegation to the existing M4-03
+  `AnalysisRepositoryPort` and M4-04 `LocalAnalysisExecutor`.
 
 M5-01 does **not** implement Analysis creation or status/result retrieval;
 those remain owned by M5-04 and M5-05. M5-02 implements the shared Error
 contract and its translation policy. M5-03 implements the first two
 business routes that actually exercise it: bounded source-media and cue
 Asset uploads (see "Bounded source-media and cue uploads (M5-03)" below).
+M5-04 implements the third: asynchronous Analysis creation (see
+"Asynchronous Analysis creation (M5-04)" below). M5-04 does **not**
+implement Analysis status/Result retrieval; that remains M5-05's endpoint
+to define.
 
 ## Dependency direction
 
@@ -79,6 +95,28 @@ root: the sole place a concrete `AssetStoragePort` implementation is
 constructed and injected into `AssetIngestionUseCase`. `asset_routes.py`
 itself never imports `infrastructure/`.
 
+M5-04's `application/create_analysis.py` is the same kind of narrow,
+documented exception, for the same circular-import reason: it raises its
+own `TooManyCuesError`/`AssetContentIncompatibleError`/
+`AssetCanonicalizationError` instead of importing `errors.py` directly;
+`analysis_routes.py` translates all three to `errors.
+ResourceLimitExceededError`/`errors.UnsupportedMediaError`. Unlike
+`asset_ingestion.py`, `create_analysis.py` *does* import
+`infrastructure.execution.local_analysis_executor.LocalAnalysisExecutor`
+and `infrastructure.media_processing`/`infrastructure.acoustic_matching.
+acceptance` directly (not only through Core/Application ports): no
+Application-owned port wraps the local executor or the
+canonicalization/matching-configuration pieces it needs, and introducing
+one is not part of this issue's own authorized scope, so this is a second,
+equally narrow, documented exception to the general "Application depends
+on ports, not concrete Infrastructure" preference -- it never imports
+`interfaces/rest_api/` or constructs a SQLite connection or filesystem
+path of its own. `app.py` -- and only `app.py` -- constructs the concrete
+`SQLiteAnalysisRepository`/`LocalAnalysisExecutor` pair (wrapped in a
+thread-safe `_ThreadLocalAnalysisRepository`; see "Asynchronous Analysis
+creation (M5-04)" below) and injects them into `CreateAnalysisUseCase`.
+`analysis_routes.py` itself never imports `infrastructure/`.
+
 ## `/api/v1` namespace and versioning independence
 
 The public boundary is versioned under:
@@ -108,6 +146,7 @@ envelope yet; Result retrieval is M5-05's endpoint to define.
 | `/api/v1/health` | GET | 200 | Baseline liveness check for the `/api/v1` namespace (M5-01). |
 | `/api/v1/assets/source-media` | POST | 201 | Bounded source-media Asset upload (M5-03). |
 | `/api/v1/assets/cue` | POST | 201 | Bounded cue Asset upload (M5-03). |
+| `/api/v1/analyses` | POST | 202 | Asynchronous Analysis creation from Asset identities (M5-04). |
 
 The complete baseline status catalog (`app.V1_STATUS_CATALOG`) reserves one
 name per HTTP status every later M5 endpoint issue must reuse rather than
@@ -117,7 +156,7 @@ reinvent:
 |---|---:|---|
 | `ok` | 200 | Synchronous success (bound to `/api/v1/health` today). |
 | `created` | 201 | A new resource was created (bound to both M5-03 upload routes). |
-| `accepted` | 202 | Asynchronous Analysis creation (`docs/architecture.md`, "Fluxo programatico": "202 Accepted + Analysis ID"); M5-04. |
+| `accepted` | 202 | Asynchronous Analysis creation (`docs/architecture.md`, "Fluxo programatico": "202 Accepted + Analysis ID"); bound by M5-04's `POST /api/v1/analyses`. |
 | `no_content` | 204 | A future successful request with no response body. |
 | `bad_request` | 400 | Domain-level invalid input caught by Core/Application (`InvalidAssetIdentifierError`, `InvalidAssetMetadataError`, `InvalidAnalysisRecordError`, `AnalysisSourceInputError`); bound by M5-02. |
 | `payload_too_large` | 413 | A size/quantity limit exceeded (`errors.ResourceLimitExceededError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.AssetUploadTooLargeError`). |
@@ -190,8 +229,10 @@ track an Analysis.
 deliberately excludes any effective-configuration override: matching
 configuration is a server-owned concern captured once per Analysis
 (`docs/analysis-effective-configuration.md`), never a client-supplied
-transport field. The `202 Accepted` asynchronous-creation response this
-request implies is M5-04's endpoint to define.
+transport field. It also carries no client-supplied Analysis identifier
+or idempotency key (see "Asynchronous Analysis creation (M5-04)" below,
+no-idempotency baseline). M5-04 implements the `202 Accepted`
+asynchronous-creation response this request implies.
 
 ## Shared Error contract and sanitization policy (M5-02)
 
@@ -334,6 +375,177 @@ becomes owned only once a future Analysis (M5-04) references it as
 issue establishes no ownership or cleanup behavior of its own for an
 uploaded-but-never-consumed Asset.
 
+## Asynchronous Analysis creation (M5-04)
+
+`POST /api/v1/analyses` accepts an `AnalysisCreateRequest` body (one
+`source_asset_id`, a non-empty `cues` list) and returns `202 Accepted`
+with `AnalysisPublic` (`status: "queued"`) and a `Location` header naming
+the created Analysis's discoverable status location
+(`/api/v1/analyses/{analysis_id}`), without waiting for acoustic matching
+to complete. Analysis status/Result retrieval at that location remains
+M5-05's endpoint to define; this route only makes the identifier
+discoverable.
+
+### Explicit cue-count limit
+
+The maximum cue count per request is explicit and configurable
+(`application/create_analysis.py`, `DEFAULT_MAX_CUE_COUNT = 20`),
+overridable at process start through the non-secret environment variable
+`AUDIO_CUE_LOCATOR_MAX_CUE_COUNT`, mirroring M5-03's own
+`AUDIO_CUE_LOCATOR_MAX_*_UPLOAD_BYTES` convention. As with those upload
+limits, no empirical usage evidence exists yet for this project; 20 is a
+conservative, explicitly documented starting point. A request exceeding
+the configured maximum is rejected via `errors.ResourceLimitExceededError`
+(413) before any persistence or scheduling call; a request with zero cues
+is rejected by `AnalysisCreateRequest`'s own schema validation (422)
+before Application is ever invoked.
+
+### No-idempotency baseline (explicit decision)
+
+`AnalysisRepositoryPort.create` requires a caller-supplied `analysis_id`
+and defines no deduplication primitive, and `AnalysisCreateRequest` never
+accepts one from a client. This issue's explicit, documented baseline:
+**`analysis_id` is always freshly generated server-side for every
+request; there is no request-level idempotency.** Two structurally
+identical creation requests (same `source_asset_id` and `cues`) persist
+two independent Analyses, each with its own identity, lifecycle, and
+eventual Result. A retried or duplicated submission is indistinguishable
+from an unrelated new request. A future issue that needs
+duplicate-suppression semantics (for example, a client-supplied
+idempotency key) would need to extend `AnalysisCreateRequest` explicitly;
+this issue does not introduce one.
+
+### Effective-configuration default (explicit decision)
+
+No function anywhere in `src/` built a default
+`EffectiveConfigurationSnapshot` before this issue.
+`docs/analysis-effective-configuration.md` section 3 explicitly names the
+choice between `acoustic_matching.baseline.DEFAULT_CONFIGURATION` and
+`acoustic_matching.acceptance.EVIDENCE_BASED_CONFIGURATION` as "a decision
+of a future Application layer". This issue's decision:
+`application.create_analysis.default_effective_configuration` copies
+`infrastructure.media_processing.canonical_audio.CANONICAL_AUDIO_SPEC`
+into `canonicalization` and **`EVIDENCE_BASED_CONFIGURATION`** (not the
+provisional `baseline.DEFAULT_CONFIGURATION`) into `matching`, recording
+`configuration_source_name = "acoustic_matching.acceptance.
+EVIDENCE_BASED_CONFIGURATION"`. Every Analysis created by this endpoint
+uses this one policy; there is no per-request override.
+
+### Asset validation and canonicalization happen before persistence
+
+Both of this issue's own State's two most operationally significant open
+items are resolved as follows, and — unlike the upload-size/allowlist
+decisions above — **both happen synchronously, as part of request
+validation, before `AnalysisRepositoryPort.create` ever persists a
+`QUEUED` record**:
+
+1. **Existence and content-format compatibility** (in place of a
+   true Asset-`logical_type` check, which no confirmed dependency
+   supports — see "Residual limitation" below): each referenced Asset
+   (`source_asset_id` and every `cues[].asset_id`) is read via the
+   existing `core.asset.AssetStoragePort.read` (raising
+   `AssetNotFoundError`, already mapped to 404, if it does not exist) and
+   its content is inspected with the existing
+   `application.asset_ingestion.sniff_media_type` (reused, not
+   reimplemented). A source must sniff as `audio/wav` or `video/mp4`; a
+   cue must sniff as `audio/wav`. A mismatch raises `errors.
+   UnsupportedMediaError` (415).
+2. **Canonicalization**: the same already-read bytes are decoded and
+   converted into a `CANONICAL_AUDIO_SPEC`-conformant (mono, float32,
+   48000 Hz, peak-normalized) NumPy array — a WAV payload is parsed
+   directly with the standard-library `wave` module (downmixed and
+   resampled with `numpy`/`scipy` as needed); an MP4 payload is first
+   decoded to WAV via the existing, sole-permitted
+   `infrastructure.media_processing.FFmpegMediaAdapter.extract_audio`.
+   Content that sniffs as a supported container but cannot actually be
+   decoded (a malformed WAV, or audio `ffmpeg`/`ffprobe` cannot decode)
+   raises `errors.UnsupportedMediaError` (415) via `application.
+   create_analysis.AssetCanonicalizationError`.
+
+**Why this is synchronous, not deferred to the async executor stage:**
+`core.analysis_lifecycle.VALID_TRANSITIONS` defines exactly
+`QUEUED`→`RUNNING`, `RUNNING`→`SUCCEEDED`, and `RUNNING`→`FAILED` — there
+is no `QUEUED`→`FAILED` transition, and `LocalAnalysisExecutor.submit`
+performs its own `QUEUED`→`RUNNING` claim as the very first thing it does
+once called. A canonicalization failure discovered *after* a `QUEUED`
+record was already persisted, but *before* `submit` is called (and
+therefore before anything has claimed the record), could not be recorded
+as `FAILED` through this project's existing, unmodified lifecycle
+contract — the Analysis would be stuck `QUEUED` forever, with no valid
+transition available and no code authorized to add one (`core.
+analysis_lifecycle` and `infrastructure/execution/
+local_analysis_executor.py` are both outside this issue's edit scope).
+Performing existence/content-format/canonicalization validation before
+`AnalysisRepositoryPort.create` is ever called avoids this entirely: a
+request that fails any of them is rejected the same way a missing or
+oversized-cue-count request already is, with no Analysis ever persisted.
+**Only the acoustic-matching correlation itself** — `run_multi_cue_
+analysis`, invoked from inside `LocalAnalysisExecutor.submit`'s own
+bounded worker pool — remains fully asynchronous and is never awaited by
+this endpoint; this is the formal issue's own named top risk ("HTTP
+handlers execute matching directly and block long requests") and the one
+this design keeps off the request path. A large source-media file's own
+decode/resample time is a bounded, accepted cost of this synchronous
+validation step (the same accepted-latency category as the
+existence-check read itself, below), not the risk this issue's own
+Restrições target.
+
+### Residual limitation: wrong-type Asset validation
+
+`core.asset.AssetStoragePort` exposes no operation returning a
+previously-ingested Asset's `logical_type` by identifier — `read`
+returns only raw bytes. This means a validly-ingested `cue` Asset
+supplied as `source_asset_id` (or vice versa), where both happen to share
+a compatible container format (both `audio/wav`), is **not detectable**
+by this endpoint: content-format compatibility checking (above) only
+catches a container-type mismatch (for example, an MP4 supplied as a
+cue), not a role mislabeling that produces an otherwise-valid container.
+This is an explicit, accepted limitation of this issue's authorized
+scope, not an oversight; closing it would require either scoping
+acceptance further (not currently proposed) or authorizing a new
+Asset-metadata-lookup capability on `AssetStoragePort`, which this issue
+does not add.
+
+### Existence-check read cost (accepted characteristic)
+
+`AssetStoragePort` exposes no lightweight existence-only primitive; `read`
+is the only way to confirm an Asset exists, and it returns the complete
+payload. Since the formal issue requires invalid/missing Asset references
+to fail before any persistence or scheduling call, this endpoint reads
+each referenced Asset's full bytes synchronously as part of request
+validation — for a large source-media Asset (up to M5-03's own 500 MiB
+upload limit), this is a real, non-trivial I/O cost inside the creation
+request. It is accepted as a known characteristic of this endpoint (not a
+defect); implementation reuses these same already-read bytes for
+canonicalization (above) rather than reading each Asset twice.
+
+### Composition-root thread-safety: `_ThreadLocalAnalysisRepository`
+
+`infrastructure/analysis_repository/sqlite_repository.py`'s
+`SQLiteAnalysisRepository` opens a `sqlite3` connection with the default
+`check_same_thread=True`, valid only on the thread that created it — but
+`LocalAnalysisExecutor` calls `AnalysisRepositoryPort.transition` from
+whichever thread its own bounded worker pool assigns each claimed
+Analysis to, never the thread that built the composition root. Sharing
+one `SQLiteAnalysisRepository` instance across both raises
+`sqlite3.ProgrammingError` from inside the worker thread — silently, since
+nothing inspects the `Future` `LocalAnalysisExecutor.submit` returns —
+leaving every created Analysis permanently `queued` (confirmed by direct
+execution during implementation; this is a pre-existing M4-03/M4-04
+integration gap this issue is the first to exercise under real concurrent
+execution). Changing `sqlite_repository.py` itself is outside this
+issue's authorized edit scope. `app.py`'s composition root instead wraps
+it in `_ThreadLocalAnalysisRepository`, which lazily constructs one
+`SQLiteAnalysisRepository` per calling thread, all pointed at the same
+database file (SQLite itself already supports multiple connections to one
+file, serialized by its own file locking and the `busy_timeout` PRAGMA
+`SQLiteAnalysisRepository.__init__` already sets). The wrapper embeds no
+SQL of its own. The database path is explicit and configurable through
+`AUDIO_CUE_LOCATOR_ANALYSIS_DB_PATH` (default
+`var/analysis_repository.sqlite3`, relative to the process's working
+directory), mirroring `AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT`'s own
+convention.
+
 ## Identifier and timestamp conventions
 
 - Every identifier (`Asset.identifier`, `Analysis.analysis_id`,
@@ -351,21 +563,23 @@ uploaded-but-never-consumed Asset.
 `app.create_app()` registers `AssetCreateRequest`, `AssetPublic`,
 `AnalysisCreateRequest`, `AnalysisPublic`, `AnalysisResultEnvelope`, and
 (M5-02) `ErrorPublic` (plus their nested enums/models) into the generated
-OpenAPI document's `components.schemas`, alongside the three routes this
-project now defines (`/api/v1/health`, and M5-03's two upload routes). This
-keeps the contract itself reviewable and renderable in OpenAPI ahead of the
-endpoints that will reference these schemas as their `response_model`/
-request body/error responses in M5-04 through M5-06.
+OpenAPI document's `components.schemas`, alongside the four routes this
+project now defines (`/api/v1/health`, M5-03's two upload routes, and
+M5-04's Analysis creation route). This keeps the contract itself
+reviewable and renderable in OpenAPI ahead of the endpoints that will
+reference these schemas as their `response_model`/request body/error
+responses in M5-05.
 
 ## Non-goals of this document
 
-This document does not define: Analysis creation orchestration (M5-04) or
-status/Result retrieval (M5-05). It does not certify that either endpoint
-exists; it fixes only the shared transport, versioning, error-translation
-(M5-02), and bounded-upload (M5-03) baseline they must build on. It also
-does not change Core matching or Analysis lifecycle semantics, log raw
-request bodies or exception payloads, persist raw uploaded media as
-evidence, define authentication, authorization, quotas, TLS, or production
-CORS policy, or add resumable uploads, streaming analysis, object storage,
-or arbitrary/client-controlled destination paths — all explicitly out of
-M5-02's and M5-03's scope.
+This document does not define: Analysis status/Result retrieval (M5-05).
+It does not certify that endpoint exists; it fixes only the shared
+transport, versioning, error-translation (M5-02), bounded-upload (M5-03),
+and asynchronous-creation (M5-04) baseline it must build on. It also does
+not change Core matching or Analysis lifecycle semantics, log raw request
+bodies or exception payloads, persist raw uploaded media as evidence,
+define authentication, authorization, quotas, TLS, or production CORS
+policy, or add resumable uploads, streaming analysis, object storage,
+distributed queues/brokers/remote workers, Analysis cancellation, bulk
+creation, Analysis listing, or arbitrary/client-controlled destination
+paths — all explicitly out of M5-02's, M5-03's, and M5-04's scope.
