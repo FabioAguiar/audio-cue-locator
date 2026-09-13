@@ -1,4 +1,4 @@
-"""Interfaces (REST API): asynchronous Analysis creation endpoint (M5-04).
+"""Interfaces (REST API): Analysis creation and read endpoints (M5-04/M5-05).
 
 Exposes ``POST /analyses`` (mounted at the shared `/api/v1` prefix by
 `interfaces.rest_api.app.create_app`, exactly as the M5-03 upload routes
@@ -8,9 +8,9 @@ canonicalization, and persistence/scheduling decision to
 `application.create_analysis.CreateAnalysisUseCase`, and maps the result to
 `schemas.AnalysisPublic` with `202 Accepted`
 (`app.V1_STATUS_CATALOG["accepted"]`) plus a `Location` header naming the
-created Analysis's status location -- Analysis status/Result retrieval
-itself remains M5-05's endpoint to define; this route only makes the
-identifier discoverable.
+created Analysis's status location.  M5-05 adds ``GET /analyses/{id}`` and
+``GET /analyses/{id}/result`` through ``application.query_analysis``;
+neither handler reads SQLite, result storage, or the filesystem directly.
 
 Per `docs/architecture.md` ("REST API e quaisquer interfaces futuras devem
 invocar operacoes da camada Application"), this module depends on
@@ -44,6 +44,7 @@ from audio_cue_locator.application.create_analysis import (
     CueRequest,
     TooManyCuesError,
 )
+from audio_cue_locator.application.query_analysis import QueryAnalysisUseCase
 from audio_cue_locator.interfaces.rest_api.errors import (
     ResourceLimitExceededError,
     UnsupportedMediaError,
@@ -51,25 +52,38 @@ from audio_cue_locator.interfaces.rest_api.errors import (
 from audio_cue_locator.interfaces.rest_api.schemas import (
     AnalysisCreateRequest,
     AnalysisPublic,
+    AnalysisResultEnvelope,
+    ErrorPublic,
     analysis_record_to_public,
+    analysis_result_to_envelope,
 )
 
 STATUS_LOCATION_HEADER = "Location"
-"""Header this route sets to the created Analysis's discoverable status
-location. No route currently serves that location (Analysis status/Result
-retrieval is M5-05's endpoint to define); the header names where it will
-live so a client need not guess the URL shape ahead of time."""
+"""Header this route sets to the created Analysis's status endpoint."""
+
+_STATUS_ERROR_RESPONSES = {
+    status.HTTP_404_NOT_FOUND: {"model": ErrorPublic},
+    status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorPublic},
+}
+_RESULT_ERROR_RESPONSES = {
+    **_STATUS_ERROR_RESPONSES,
+    status.HTTP_409_CONFLICT: {"model": ErrorPublic},
+}
 
 
-def build_analysis_router(use_case: CreateAnalysisUseCase) -> APIRouter:
-    """Return an `APIRouter` exposing the Analysis creation endpoint against
-    the given, already-constructed `use_case`.
+def build_analysis_router(
+    create_use_case: CreateAnalysisUseCase,
+    query_use_case: QueryAnalysisUseCase | None = None,
+) -> APIRouter:
+    """Return an ``APIRouter`` for Analysis creation, status, and Result.
 
     A factory rather than a module-level router, mirroring
-    `asset_routes.build_asset_router`: `use_case` carries the concrete
-    `AnalysisRepositoryPort`/`AssetStoragePort`/`LocalAnalysisExecutor`
-    `interfaces.rest_api.app`'s composition root constructs, so this module
-    never wires a default itself.
+    ``asset_routes.build_asset_router``. Both use cases are constructed by
+    ``interfaces.rest_api.app``; this module depends on Application contracts
+    only and never wires or imports a concrete persistence/result-storage
+    adapter. ``query_use_case`` remains optional only so the pre-M5-05
+    creation-only builder call stays compatible; the production composition
+    root always supplies it.
     """
 
     router = APIRouter()
@@ -82,7 +96,31 @@ def build_analysis_router(use_case: CreateAnalysisUseCase) -> APIRouter:
         tags=["v1"],
     )
     def create_analysis(payload: AnalysisCreateRequest, response: Response) -> AnalysisPublic:
-        return _create_analysis(payload, response, use_case)
+        return _create_analysis(payload, response, create_use_case)
+
+    if query_use_case is not None:
+
+        @router.get(
+            "/analyses/{analysis_id}",
+            response_model=AnalysisPublic,
+            status_code=status.HTTP_200_OK,
+            summary="Get the current persisted Analysis status",
+            responses=_STATUS_ERROR_RESPONSES,
+            tags=["v1"],
+        )
+        def get_analysis_status(analysis_id: str) -> AnalysisPublic:
+            return _get_analysis_status(analysis_id, query_use_case)
+
+        @router.get(
+            "/analyses/{analysis_id}/result",
+            response_model=AnalysisResultEnvelope,
+            status_code=status.HTTP_200_OK,
+            summary="Get a completed Analysis Result",
+            responses=_RESULT_ERROR_RESPONSES,
+            tags=["v1"],
+        )
+        def get_analysis_result(analysis_id: str) -> AnalysisResultEnvelope:
+            return _get_analysis_result(analysis_id, query_use_case)
 
     return router
 
@@ -107,3 +145,19 @@ def _create_analysis(
     public = analysis_record_to_public(record)
     response.headers[STATUS_LOCATION_HEADER] = f"/api/v1/analyses/{public.analysis_id}"
     return public
+
+
+def _get_analysis_status(
+    analysis_id: str, use_case: QueryAnalysisUseCase
+) -> AnalysisPublic:
+    """Map the Application's current persisted record to its public shape."""
+
+    return analysis_record_to_public(use_case.get_status(analysis_id))
+
+
+def _get_analysis_result(
+    analysis_id: str, use_case: QueryAnalysisUseCase
+) -> AnalysisResultEnvelope:
+    """Map one lifecycle-gated canonical Result to the versioned envelope."""
+
+    return analysis_result_to_envelope(use_case.get_result(analysis_id))

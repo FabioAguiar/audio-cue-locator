@@ -20,7 +20,7 @@ directly: translating it into one of the REST-boundary exception types
 below (or into a persisted `core.analysis_result.StructuredError` on the
 Analysis record) is Application's responsibility, exercised by the
 endpoint issues that actually call Infrastructure (M5-03/M5-04).
-`UnsupportedMediaError`, `ResourceLimitExceededError`, and
+`UnsupportedMediaError`, `ResourceLimitExceededError`, and the compatibility
 `AnalysisResultUnavailableError` are this module's own REST-boundary
 vocabulary for the failure classes those future endpoints will raise; they
 carry no Infrastructure or Core import of their own, and are defined here
@@ -41,6 +41,11 @@ A route must raise one of the exception types mapped below (or let
 `RequestValidationError` propagate from FastAPI/Pydantic's own request
 parsing) to go through this policy; raising `fastapi.HTTPException`
 directly bypasses it and is not used by any code in this package.
+
+M5-05's Application-owned `AnalysisResultNotReadyError` and
+`AnalysisFailedError` are mapped here directly to distinct safe codes at the
+shared 409 status. The older REST-owned `AnalysisResultUnavailableError`
+mapping remains additive compatibility for existing callers.
 """
 
 from __future__ import annotations
@@ -53,6 +58,10 @@ from fastapi.responses import JSONResponse
 
 from audio_cue_locator.application.multi_cue_orchestration import (
     AnalysisSourceInputError,
+)
+from audio_cue_locator.application.query_analysis import (
+    AnalysisFailedError,
+    AnalysisResultNotReadyError,
 )
 from audio_cue_locator.application.ports.analysis_repository import (
     AnalysisAlreadyExistsError,
@@ -100,6 +109,7 @@ SAFE_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.LIFECYCLE_CONFLICT: (
         "The requested operation conflicts with the resource's current state."
     ),
+    ErrorCode.RESULT_NOT_READY: "The Analysis Result is not available yet.",
     ErrorCode.ANALYSIS_FAILED: (
         "The Analysis reached a failed state and has no available Result."
     ),
@@ -130,6 +140,12 @@ _EXCEPTION_STATUS_MAP: tuple[tuple[type[Exception], ErrorCode, int], ...] = (
     ),
     (AssetStorageCollisionError, ErrorCode.LIFECYCLE_CONFLICT, status.HTTP_409_CONFLICT),
     (AnalysisAlreadyExistsError, ErrorCode.LIFECYCLE_CONFLICT, status.HTTP_409_CONFLICT),
+    (
+        AnalysisResultNotReadyError,
+        ErrorCode.RESULT_NOT_READY,
+        status.HTTP_409_CONFLICT,
+    ),
+    (AnalysisFailedError, ErrorCode.ANALYSIS_FAILED, status.HTTP_409_CONFLICT),
     (
         AnalysisResultUnavailableError,
         ErrorCode.ANALYSIS_FAILED,

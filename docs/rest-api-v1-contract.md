@@ -11,7 +11,7 @@ timestamp conventions, a baseline route and HTTP status catalog, explicit
 transport-to-Application mappings, and OpenAPI representability.
 
 The executable contract lives in these modules under
-`src/audio_cue_locator/interfaces/rest_api/` (plus one Application module):
+`src/audio_cue_locator/interfaces/rest_api/` (plus Application modules):
 
 - `schemas.py` — the public Pydantic v1 request/response schemas for Asset,
   Analysis, and (M5-02) the shared Error envelope, plus one explicit
@@ -25,7 +25,8 @@ The executable contract lives in these modules under
   implementation into the upload routes, and (M5-04) the second
   composition-root responsibility that wires a concrete
   `AnalysisRepositoryPort` and a `LocalAnalysisExecutor` into the Analysis
-  creation route.
+  creation route. M5-05 constructs one `InMemoryResultReferenceStore` and
+  shares it with both the executor and the Analysis query use case.
 - `errors.py` (M5-02) — the centralized v1 failure-translation policy:
   the closed exception-to-`ErrorCode`/HTTP-status mapping and
   `install_error_handlers`, which every current and future `/api/v1`
@@ -38,25 +39,27 @@ The executable contract lives in these modules under
   supported-media allowlists per logical Asset type, content-based
   media-type detection, and delegation to the existing M4-02
   `core.asset.AssetStoragePort`.
-- `analysis_routes.py` (M5-04) — the asynchronous Analysis creation route
-  (`build_analysis_router`); delegates every validation, canonicalization,
-  and persistence/scheduling decision to Application.
+- `analysis_routes.py` (M5-04/M5-05) — the asynchronous Analysis creation
+  route plus status and Result retrieval routes (`build_analysis_router`);
+  delegates every decision to Application.
 - `application/create_analysis.py` (M5-04) — the Application-level
   asynchronous Analysis creation use case: cue-count validation, Asset
   existence/content-compatibility checks, WAV/MP4-to-canonical-array
   resolution, a default effective-configuration policy, a documented
   no-idempotency baseline, and delegation to the existing M4-03
   `AnalysisRepositoryPort` and M4-04 `LocalAnalysisExecutor`.
+- `application/query_analysis.py` (M5-05) — the read-only Application
+  boundary for authoritative persisted status and lifecycle-gated Result
+  retrieval through an opaque-reference reader port.
 
 M5-01 does **not** implement Analysis creation or status/result retrieval;
-those remain owned by M5-04 and M5-05. M5-02 implements the shared Error
+those are owned by M5-04 and M5-05. M5-02 implements the shared Error
 contract and its translation policy. M5-03 implements the first two
 business routes that actually exercise it: bounded source-media and cue
 Asset uploads (see "Bounded source-media and cue uploads (M5-03)" below).
 M5-04 implements the third: asynchronous Analysis creation (see
-"Asynchronous Analysis creation (M5-04)" below). M5-04 does **not**
-implement Analysis status/Result retrieval; that remains M5-05's endpoint
-to define.
+"Asynchronous Analysis creation (M5-04)" below). M5-05 completes the
+polling flow with the two GET routes documented below.
 
 ## Dependency direction
 
@@ -77,7 +80,8 @@ example `media_processing.errors.InvalidMediaError`) is Application's
 responsibility to translate into one of `errors.py`'s own exception types
 (`UnsupportedMediaError`, `ResourceLimitExceededError`,
 `AnalysisResultUnavailableError`) or into a persisted `StructuredError`
-before it ever reaches Interfaces.
+before it ever reaches Interfaces. M5-05's Application query raises its own
+storage-independent lifecycle outcomes, which `errors.py` maps centrally.
 
 M5-03's `application/asset_ingestion.py` is one narrow, documented
 exception to the "no upward import" rule's naive reading: it cannot import
@@ -133,11 +137,10 @@ unrelated policies: an incompatible `/api/v1` change does not require a new
 Result schema version, and vice versa.
 
 `schemas.AnalysisResultEnvelope` makes this concrete: its `api_version`
-field is the literal `"v1"`, while `result_schema_version` is read from
-`core.analysis_result.SCHEMA_VERSION` and `result` stays an untyped,
+field is the literal `"v1"`, while `result_schema_version` is copied from
+the stored Result body's own `schema_version` and `result` stays an untyped,
 opaque mapping so this document and module never duplicate or redefine the
-M3 Result schema (`docs/analysis-result-schema.md`). No route returns this
-envelope yet; Result retrieval is M5-05's endpoint to define.
+M3 Result schema (`docs/analysis-result-schema.md`).
 
 ## Baseline route and HTTP status catalog
 
@@ -147,6 +150,8 @@ envelope yet; Result retrieval is M5-05's endpoint to define.
 | `/api/v1/assets/source-media` | POST | 201 | Bounded source-media Asset upload (M5-03). |
 | `/api/v1/assets/cue` | POST | 201 | Bounded cue Asset upload (M5-03). |
 | `/api/v1/analyses` | POST | 202 | Asynchronous Analysis creation from Asset identities (M5-04). |
+| `/api/v1/analyses/{analysis_id}` | GET | 200 | Current persisted Analysis status (M5-05). |
+| `/api/v1/analyses/{analysis_id}/result` | GET | 200 | Independently versioned Result for a SUCCEEDED Analysis (M5-05). |
 
 The complete baseline status catalog (`app.V1_STATUS_CATALOG`) reserves one
 name per HTTP status every later M5 endpoint issue must reuse rather than
@@ -154,7 +159,7 @@ reinvent:
 
 | Name | HTTP status | Reserved for |
 |---|---:|---|
-| `ok` | 200 | Synchronous success (bound to `/api/v1/health` today). |
+| `ok` | 200 | Synchronous success (health, Analysis status, and completed Result retrieval). |
 | `created` | 201 | A new resource was created (bound to both M5-03 upload routes). |
 | `accepted` | 202 | Asynchronous Analysis creation (`docs/architecture.md`, "Fluxo programatico": "202 Accepted + Analysis ID"); bound by M5-04's `POST /api/v1/analyses`. |
 | `no_content` | 204 | A future successful request with no response body. |
@@ -162,17 +167,16 @@ reinvent:
 | `payload_too_large` | 413 | A size/quantity limit exceeded (`errors.ResourceLimitExceededError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.AssetUploadTooLargeError`). |
 | `unsupported_media_type` | 415 | Submitted media fails format/codec/audio-stream validation (`errors.UnsupportedMediaError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.UnsupportedAssetMediaError`). |
 | `not_found` | 404 | An Asset or Analysis identifier with no matching resource (`AssetNotFoundError`, `AnalysisNotFoundError`); bound by M5-02, used by M5-05. |
-| `conflict` | 409 | A state conflict: an Analysis lifecycle transition conflict, an already-existing Analysis identifier, an Asset storage collision, or a Result requested for a FAILED Analysis; bound by M5-02, used by M5-04. |
+| `conflict` | 409 | A state conflict: an Analysis lifecycle transition conflict, an already-existing Analysis identifier, an Asset storage collision, or a Result requested while its Analysis is pending/FAILED; used by M5-04/M5-05. |
 | `unprocessable_entity` | 422 | Request-shape validation caught by FastAPI/Pydantic before Application runs (`RequestValidationError`); bound by M5-02. |
 | `internal_error` | 500 | Any unmapped/unexpected exception; bound by M5-02. |
 
 `ok`, `created`, and every 4xx/5xx entry above are bound to the centralized
 handlers `errors.install_error_handlers` registers on every `/api/v1`
 app instance (M5-02). M5-03's two upload routes are the first business
-routes to actually raise `payload_too_large`/`unsupported_media_type`;
-Analysis creation and Result retrieval remain M5-04/M5-05's endpoints to
-define, and the policy already applies to any request-validation failure
-FastAPI itself raises today regardless.
+routes to actually raise `payload_too_large`/`unsupported_media_type`; the
+same policy applies to Analysis creation/status/Result routes and to any
+request-validation failure FastAPI itself raises.
 
 ## Public Asset schema
 
@@ -242,7 +246,7 @@ across every endpoint family uses this one schema
 
 | Field | Required | Type | Notes |
 |---|---:|---|---|
-| `error_code` | yes | `ErrorCode` enum | One of the seven closed, additive-only values below. |
+| `error_code` | yes | `ErrorCode` enum | One of the eight closed, additive-only values below. |
 | `message` | yes | string | Always one of a small, fixed set of safe strings (`errors.SAFE_MESSAGES`); never a raw exception message, stack trace, host path, SQL fragment, or echoed request value. |
 | `correlation_id` | yes | string | A random, non-guessable `uuid.uuid4().hex` value a client can report back for operator diagnosis, without the response itself disclosing anything about the underlying cause (acceptance criterion 5). |
 
@@ -255,6 +259,7 @@ across every endpoint family uses this one schema
 | `resource_limit_exceeded` | 413 | `errors.ResourceLimitExceededError` (a declared size or quantity limit, for example an oversized upload or too many cues). |
 | `resource_not_found` | 404 | `AssetNotFoundError`; `AnalysisNotFoundError`. |
 | `lifecycle_conflict` | 409 | `InvalidLifecycleTransitionError`; `AssetStorageCollisionError`; `AnalysisAlreadyExistsError`. |
+| `result_not_ready` | 409 | `application.query_analysis.AnalysisResultNotReadyError`, raised for Result retrieval while the persisted state is `queued` or `running`. |
 | `analysis_failed` | 409 | `errors.AnalysisResultUnavailableError`, raised when a Result is requested for an Analysis whose persisted state is FAILED. Distinct from `InvalidLifecycleTransitionError`, which guards state *transitions* rather than Result *retrieval*. |
 | `internal_error` | 500 | Any other exception (the catch-all `Exception` handler). |
 
@@ -276,8 +281,8 @@ structurally cannot reach any handler `install_error_handlers` registers.
 A persisted FAILED Analysis's `structured_error` remains visible on the
 successful `AnalysisPublic` response exactly as M5-01 defined it; only
 *requesting the Result body* of a FAILED Analysis is a REST-level
-conflict, raised as `AnalysisResultUnavailableError` and mapped to
-`analysis_failed`/409 above.
+conflict, raised as `AnalysisFailedError` (or the compatibility
+`AnalysisResultUnavailableError`) and mapped to `analysis_failed`/409 above.
 
 ### Sanitization guarantee
 
@@ -297,9 +302,8 @@ the catalog above (or let `RequestValidationError` propagate from
 FastAPI/Pydantic's own request parsing) to go through this policy. Raising
 `fastapi.HTTPException` directly bypasses it entirely and is not used by
 any code in this package; M5-03's upload routes already follow this (see
-"Bounded source-media and cue uploads" below), and a future M5-04/M5-05
-endpoint must do the same, not raise `HTTPException`, to stay within this
-contract.
+"Bounded source-media and cue uploads" below), and the M5-04/M5-05
+endpoints do the same, never raising `HTTPException`.
 
 ## Bounded source-media and cue uploads (M5-03)
 
@@ -546,6 +550,42 @@ SQL of its own. The database path is explicit and configurable through
 directory), mirroring `AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT`'s own
 convention.
 
+## Analysis status and Result retrieval (M5-05)
+
+`GET /api/v1/analyses/{analysis_id}` performs one read through
+`application.query_analysis.QueryAnalysisUseCase.get_status` and returns
+the existing `AnalysisPublic` schema with HTTP 200. The repository record is
+the sole lifecycle authority, so all four persisted states (`queued`,
+`running`, `succeeded`, and `failed`) are returned as-is and the request does
+not cache, infer, or transition state. A missing identifier propagates
+`AnalysisNotFoundError` to the shared `resource_not_found`/404 response.
+
+`GET /api/v1/analyses/{analysis_id}/result` first reads the same authoritative
+record, then applies this closed lifecycle gate:
+
+| Persisted state / condition | HTTP outcome |
+|---|---|
+| `queued` or `running` | 409 shared Error envelope with `result_not_ready`. |
+| `failed` | 409 shared Error envelope with `analysis_failed`. |
+| missing Analysis | 404 shared Error envelope with `resource_not_found`. |
+| `succeeded` with an available valid Result body | 200 `AnalysisResultEnvelope`. |
+| `succeeded` with a missing reference, unavailable body, malformed JSON, mismatched `analysis_id`, missing version, or non-completed body | Sanitized 500 `internal_error`; no reference or storage detail is exposed. |
+
+The Application query reads the Result through its own
+`ResultReferenceReaderPort`; neither REST handler imports Infrastructure.
+The composition root creates exactly one `InMemoryResultReferenceStore` and
+injects that instance into both `LocalAnalysisExecutor` (writer) and
+`QueryAnalysisUseCase` (reader). This is intentionally local-process and
+non-durable: restart, multi-process sharing, object storage, or a new result
+database remain outside M5-05.
+
+The successful envelope copies `result_schema_version` from the stored
+Result body's own `schema_version`; `/api/v1` never substitutes its API
+version. The canonical Result body is returned unchanged. In particular, a
+`CueNoMatch` remains a successful completed Result whose cue outcome is
+`{"kind": "no_match", "occurrences": null, "failure": null}`—never a
+FAILED Analysis or an Error response.
+
 ## Identifier and timestamp conventions
 
 - Every identifier (`Asset.identifier`, `Analysis.analysis_id`,
@@ -563,20 +603,18 @@ convention.
 `app.create_app()` registers `AssetCreateRequest`, `AssetPublic`,
 `AnalysisCreateRequest`, `AnalysisPublic`, `AnalysisResultEnvelope`, and
 (M5-02) `ErrorPublic` (plus their nested enums/models) into the generated
-OpenAPI document's `components.schemas`, alongside the four routes this
-project now defines (`/api/v1/health`, M5-03's two upload routes, and
-M5-04's Analysis creation route). This keeps the contract itself
-reviewable and renderable in OpenAPI ahead of the endpoints that will
-reference these schemas as their `response_model`/request body/error
-responses in M5-05.
+OpenAPI document's `components.schemas`, alongside the six routes this
+project now defines (`/api/v1/health`, M5-03's two upload routes, M5-04's
+Analysis creation route, and M5-05's status and Result routes). This keeps
+the contract reviewable and renderable from the executable route/schema
+definitions.
 
 ## Non-goals of this document
 
-This document does not define: Analysis status/Result retrieval (M5-05).
-It does not certify that endpoint exists; it fixes only the shared
-transport, versioning, error-translation (M5-02), bounded-upload (M5-03),
-and asynchronous-creation (M5-04) baseline it must build on. It also does
-not change Core matching or Analysis lifecycle semantics, log raw request
+This document does not define Analysis listing, cancellation, WebSocket or
+event-stream updates, optimized polling, direct Result file downloads, or
+durable/distributed Result storage. It also does not change Core matching or
+Analysis lifecycle semantics, log raw request
 bodies or exception payloads, persist raw uploaded media as evidence,
 define authentication, authorization, quotas, TLS, or production CORS
 policy, or add resumable uploads, streaming analysis, object storage,

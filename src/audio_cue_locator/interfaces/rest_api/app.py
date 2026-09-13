@@ -11,9 +11,10 @@ AssetIngestionUseCase` to a concrete `AssetStoragePort` implementation for
 of M5-04, the second composition-root responsibility that wires
 `application.create_analysis.CreateAnalysisUseCase` to a concrete
 `AnalysisRepositoryPort` and a `LocalAnalysisExecutor` for
-`interfaces.rest_api.analysis_routes`'s asynchronous creation endpoint. It
-does not define Analysis status/result retrieval endpoints; those remain
-owned by M5-05 (`docs/rest-api-v1-contract.md`). The Asset/Analysis/Error
+`interfaces.rest_api.analysis_routes`'s asynchronous creation endpoint. As
+of M5-05, that composition root also shares one Result store between the
+executor and ``application.query_analysis.QueryAnalysisUseCase`` for status
+and Result retrieval. The Asset/Analysis/Error
 transport schemas in `schemas.py` are registered into the generated
 OpenAPI document as components even where no business route yet returns
 them, so the contract itself is reviewable and OpenAPI-representable ahead
@@ -86,6 +87,7 @@ from audio_cue_locator.application.create_analysis import (
     DEFAULT_MAX_CUE_COUNT,
     CreateAnalysisUseCase,
 )
+from audio_cue_locator.application.query_analysis import QueryAnalysisUseCase
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
     SQLiteAnalysisRepository,
 )
@@ -93,6 +95,7 @@ from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage imp
     LocalFilesystemAssetStorage,
 )
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
+    InMemoryResultReferenceStore,
     LocalAnalysisExecutor,
 )
 from audio_cue_locator.interfaces.rest_api.analysis_routes import build_analysis_router
@@ -287,16 +290,34 @@ def _build_create_analysis_use_case(
     project's second composition-root responsibility (see module
     docstring)."""
 
+    create_use_case, _ = _build_analysis_use_cases(storage)
+    return create_use_case
+
+
+def _build_analysis_use_cases(
+    storage: LocalFilesystemAssetStorage,
+) -> tuple[CreateAnalysisUseCase, QueryAnalysisUseCase]:
+    """Construct Analysis write/read use cases with one shared Result store.
+
+    The repository remains the sole lifecycle authority.  The shared
+    ``InMemoryResultReferenceStore`` closes the local-process accessibility
+    gap: the executor writes a canonical Result body and the query use case
+    reads that same body through its Application-owned reader Protocol.
+    """
+
     db_path = _analysis_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     repository = _ThreadLocalAnalysisRepository(db_path)
-    executor = LocalAnalysisExecutor(repository)
-    return CreateAnalysisUseCase(
+    result_store = InMemoryResultReferenceStore()
+    executor = LocalAnalysisExecutor(repository, result_store=result_store)
+    create_use_case = CreateAnalysisUseCase(
         repository=repository,
         asset_storage=storage,
         executor=executor,
         max_cue_count=_max_cue_count(),
     )
+    query_use_case = QueryAnalysisUseCase(repository, result_store)
+    return create_use_case, query_use_case
 
 
 _TRANSPORT_SCHEMAS_FOR_OPENAPI = (
@@ -331,8 +352,11 @@ def create_app() -> FastAPI:
         build_asset_router(_build_asset_ingestion_use_case(asset_storage)),
         prefix=API_V1_PREFIX,
     )
+    create_analysis_use_case, query_analysis_use_case = _build_analysis_use_cases(
+        asset_storage
+    )
     app.include_router(
-        build_analysis_router(_build_create_analysis_use_case(asset_storage)),
+        build_analysis_router(create_analysis_use_case, query_analysis_use_case),
         prefix=API_V1_PREFIX,
     )
 

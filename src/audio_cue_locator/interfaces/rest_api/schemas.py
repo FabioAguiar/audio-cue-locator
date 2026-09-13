@@ -37,15 +37,16 @@ publicly (`context-packs/M5/M5-01/issue-analysis.json#/analysis/risks/2`).
 Result schema versions are independently represented") a concrete,
 OpenAPI-representable schema rather than only a documentation statement:
 its `api_version` field is always `"v1"`, while `result_schema_version`
-is sourced from `core.analysis_result.SCHEMA_VERSION` and evolves under
-that module's own, unrelated versioning policy. No route returns this
-envelope yet; Result retrieval is M5-05's endpoint to define.
+is copied by `analysis_result_to_envelope` from the stored Result body's own
+`schema_version` and evolves under that contract's unrelated versioning
+policy. M5-05's Result route returns this envelope.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from collections.abc import Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -273,18 +274,15 @@ def analysis_record_to_public(record: AnalysisRecord) -> AnalysisPublic:
     )
 
 
-# --- Result envelope (versioning-independence example; not yet routed) -----
+# --- Result envelope (versioning independence, routed by M5-05) ------------
 
 
 class AnalysisResultEnvelope(_ForbidExtraModel):
     """Illustrates that a v1 response carrying a Result keeps the Result's
     own `schema_version` fully independent of the `/api/v1` namespace
-    version (acceptance criterion 4). No route returns this schema yet:
-    Result retrieval is M5-05's endpoint to define. `result` stays an
-    untyped mapping deliberately, so this module does not duplicate or
-    redefine the M3 Result schema documented in
-    `docs/analysis-result-schema.md`; a future consumer decodes it with
-    `core.analysis_result`, not with a type declared here.
+    version (acceptance criterion 4). `result` stays an untyped mapping
+    deliberately, so this module does not duplicate or redefine the M3
+    Result schema documented in `docs/analysis-result-schema.md`.
     """
 
     api_version: Literal["v1"] = API_VERSION
@@ -295,6 +293,24 @@ class AnalysisResultEnvelope(_ForbidExtraModel):
             "Opaque canonical Analysis Result body produced by "
             "core.analysis_result.to_canonical_dict; not re-typed here."
         ),
+    )
+
+
+def analysis_result_to_envelope(result: Mapping[str, object]) -> AnalysisResultEnvelope:
+    """Wrap one canonical Result mapping without replacing its version.
+
+    ``QueryAnalysisUseCase`` validates the required ``schema_version`` before
+    this transport mapping runs.  Reading the value from the Result body,
+    rather than substituting the current API or Core default, preserves the
+    independent version carried by the stored artifact.
+    """
+
+    schema_version = result.get("schema_version")
+    if not isinstance(schema_version, str) or not schema_version:
+        raise ValueError("Result schema_version must be a non-empty string")
+    return AnalysisResultEnvelope(
+        result_schema_version=schema_version,
+        result=dict(result),
     )
 
 
@@ -314,6 +330,7 @@ class ErrorCode(str, Enum):
     RESOURCE_LIMIT_EXCEEDED = "resource_limit_exceeded"
     RESOURCE_NOT_FOUND = "resource_not_found"
     LIFECYCLE_CONFLICT = "lifecycle_conflict"
+    RESULT_NOT_READY = "result_not_ready"
     ANALYSIS_FAILED = "analysis_failed"
     INTERNAL_ERROR = "internal_error"
 

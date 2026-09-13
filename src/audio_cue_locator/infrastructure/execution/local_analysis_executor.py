@@ -188,8 +188,13 @@ class ResultReferenceStore(Protocol):
 
 
 class InMemoryResultReferenceStore:
-    """Non-durable default `ResultReferenceStore`: keeps serialized results
-    in an in-process, thread-safe dict keyed by a generated reference.
+    """Non-durable Result writer and read-side adapter.
+
+    Keeps serialized results in an in-process, thread-safe dict keyed by a
+    generated reference.  ``save`` satisfies ``ResultReferenceStore`` for
+    execution, while ``read`` structurally satisfies Application's
+    ``ResultReferenceReaderPort`` without making Application depend on this
+    Infrastructure type.
 
     This is explicitly a placeholder, not a durability decision: this issue
     authorizes no new persistent storage path or adapter, and introducing
@@ -214,8 +219,12 @@ class InMemoryResultReferenceStore:
 
     def read(self, reference: str) -> str:
         """Return the canonical JSON string previously `save`d under
-        `reference`. Not part of `ResultReferenceStore`; provided only for
-        tests and manual inspection of this default implementation."""
+        `reference`.
+
+        A missing opaque reference raises ``KeyError``; the Application query
+        boundary converts that adapter detail into a sanitized internal
+        integrity failure before it reaches transport.
+        """
 
         with self._lock:
             return self._serialized_results[reference]
