@@ -1,4 +1,4 @@
-"""Focused M4-06 coverage for persisted additional Asset ownership."""
+"""M4 repository persistence, lifecycle, ownership, and separation coverage."""
 
 import json
 import sqlite3
@@ -9,15 +9,22 @@ from uuid import uuid4
 import pytest
 
 from audio_cue_locator.application.ports.analysis_repository import (
+    AnalysisAlreadyExistsError,
+    AnalysisNotFoundError,
     CueAssetReference,
     InvalidAnalysisRecordError,
 )
-from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
+from audio_cue_locator.core.analysis_lifecycle import (
+    AnalysisLifecycleState,
+    InvalidLifecycleTransitionError,
+)
 from audio_cue_locator.core.analysis_result import (
     CanonicalizationSnapshot,
     EffectiveConfigurationSnapshot,
+    FailureCategory,
     MatchingSnapshot,
     NormalizationSnapshot,
+    StructuredError,
 )
 from audio_cue_locator.core.asset import InvalidAssetIdentifierError
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
@@ -49,14 +56,155 @@ def _configuration() -> EffectiveConfigurationSnapshot:
     )
 
 
-def _create_record(repository: SQLiteAnalysisRepository):
+def _create_record(
+    repository: SQLiteAnalysisRepository,
+    *,
+    analysis_id: str = "analysis-1",
+    source_asset_id: str | None = None,
+    cue_asset_id: str | None = None,
+):
     return repository.create(
-        analysis_id="analysis-1",
-        source_asset_id=_asset_id(),
-        cues=(CueAssetReference(cue_id="cue-1", asset_id=_asset_id()),),
+        analysis_id=analysis_id,
+        source_asset_id=source_asset_id or _asset_id(),
+        cues=(CueAssetReference(cue_id="cue-1", asset_id=cue_asset_id or _asset_id()),),
         effective_configuration=_configuration(),
         queued_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
+
+
+def test_create_get_round_trip_survives_repository_reopen(tmp_path: Path):
+    database_path = tmp_path / "analyses.sqlite"
+    with SQLiteAnalysisRepository(database_path) as repository:
+        created = _create_record(repository)
+
+    with SQLiteAnalysisRepository(database_path) as reopened:
+        persisted = reopened.get(created.analysis_id)
+
+    assert persisted == created
+
+
+def test_create_rejects_duplicate_without_replacing_original(tmp_path: Path):
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        original = _create_record(repository)
+
+        with pytest.raises(AnalysisAlreadyExistsError):
+            _create_record(repository)
+
+        assert repository.get(original.analysis_id) == original
+
+
+def test_get_and_transition_report_missing_analysis(tmp_path: Path):
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        with pytest.raises(AnalysisNotFoundError):
+            repository.get("missing")
+        with pytest.raises(AnalysisNotFoundError):
+            repository.transition(
+                "missing",
+                AnalysisLifecycleState.RUNNING,
+                at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+
+
+def test_list_by_state_returns_only_records_in_requested_state(tmp_path: Path):
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        queued = _create_record(repository, analysis_id="queued")
+        running = _create_record(repository, analysis_id="running")
+        running = repository.transition(
+            running.analysis_id,
+            AnalysisLifecycleState.RUNNING,
+            at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        assert repository.list_by_state(AnalysisLifecycleState.QUEUED) == (queued,)
+        assert repository.list_by_state(AnalysisLifecycleState.RUNNING) == (running,)
+        assert repository.list_by_state(AnalysisLifecycleState.SUCCEEDED) == ()
+        assert repository.list_by_state(AnalysisLifecycleState.FAILED) == ()
+
+
+def test_terminal_result_and_error_data_survive_reopen(tmp_path: Path):
+    database_path = tmp_path / "analyses.sqlite"
+    failure = StructuredError(
+        category=FailureCategory.INTERNAL_FAILURE,
+        message="controlled failure",
+    )
+    with SQLiteAnalysisRepository(database_path) as repository:
+        succeeded = _create_record(repository, analysis_id="succeeded")
+        failed = _create_record(repository, analysis_id="failed")
+        for record in (succeeded, failed):
+            repository.transition(
+                record.analysis_id,
+                AnalysisLifecycleState.RUNNING,
+                at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+        repository.transition(
+            succeeded.analysis_id,
+            AnalysisLifecycleState.SUCCEEDED,
+            at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            result_reference="result:succeeded",
+        )
+        repository.transition(
+            failed.analysis_id,
+            AnalysisLifecycleState.FAILED,
+            at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            structured_error=failure,
+        )
+
+    with SQLiteAnalysisRepository(database_path) as reopened:
+        persisted_success = reopened.get(succeeded.analysis_id)
+        persisted_failure = reopened.get(failed.analysis_id)
+
+    assert persisted_success.state is AnalysisLifecycleState.SUCCEEDED
+    assert persisted_success.result_reference == "result:succeeded"
+    assert persisted_success.structured_error is None
+    assert persisted_failure.state is AnalysisLifecycleState.FAILED
+    assert persisted_failure.result_reference is None
+    assert persisted_failure.structured_error == failure
+
+
+def test_invalid_transition_is_atomic_and_leaves_row_unchanged(tmp_path: Path):
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        original = _create_record(repository)
+
+        with pytest.raises(InvalidLifecycleTransitionError):
+            repository.transition(
+                original.analysis_id,
+                AnalysisLifecycleState.SUCCEEDED,
+                at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                result_reference="must-not-persist",
+            )
+
+        assert repository.get(original.analysis_id) == original
+
+
+def test_sqlite_schema_and_values_are_metadata_only(tmp_path: Path):
+    database_path = tmp_path / "analyses.sqlite"
+    with SQLiteAnalysisRepository(database_path) as repository:
+        created = _create_record(repository)
+        repository.add_owned_asset(created.analysis_id, _asset_id())
+
+    with sqlite3.connect(database_path) as connection:
+        columns = connection.execute("PRAGMA table_info(analyses)").fetchall()
+        persisted_types = connection.execute(
+            "SELECT "
+            "typeof(analysis_id), typeof(state), typeof(source_asset_id), "
+            "typeof(cues_json), typeof(effective_configuration_json), "
+            "typeof(lifecycle_timestamps_json), typeof(owned_asset_ids_json), "
+            "typeof(result_reference), typeof(structured_error_json) "
+            "FROM analyses WHERE analysis_id = ?",
+            (created.analysis_id,),
+        ).fetchone()
+        persisted_values = connection.execute(
+            "SELECT analysis_id, state, source_asset_id, cues_json, "
+            "effective_configuration_json, lifecycle_timestamps_json, "
+            "owned_asset_ids_json, result_reference, structured_error_json "
+            "FROM analyses WHERE analysis_id = ?",
+            (created.analysis_id,),
+        ).fetchone()
+
+    assert {column[2].upper() for column in columns} == {"TEXT"}
+    assert all("blob" not in column[1].lower() for column in columns)
+    assert set(persisted_types) <= {"text", "null"}
+    assert all(not isinstance(value, bytes) for value in persisted_values)
 
 
 def test_add_owned_asset_is_idempotent_and_survives_reopen(tmp_path: Path):

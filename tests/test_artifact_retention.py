@@ -19,6 +19,13 @@ from audio_cue_locator.core.analysis_result import (
     NormalizationSnapshot,
     StructuredError,
 )
+from audio_cue_locator.core.asset import AssetNotFoundError, AssetType
+from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
+    SQLiteAnalysisRepository,
+)
+from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage import (
+    LocalFilesystemAssetStorage,
+)
 from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
     MINIMUM_RETENTION_WINDOW,
     InvalidRetentionPolicyError,
@@ -278,3 +285,85 @@ def test_cleanup_requires_timezone_aware_now():
             _Storage(set()),
             now=datetime(2026, 1, 15),
         )
+
+
+def test_real_adapters_isolate_cleanup_between_simultaneously_persisted_owners(
+    tmp_path,
+):
+    storage_root = tmp_path / "assets"
+    storage = LocalFilesystemAssetStorage(storage_root)
+    eligible_source = storage.ingest(
+        b"eligible source",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="eligible.wav",
+        detected_media_type="audio/wav",
+    )
+    protected_source = storage.ingest(
+        b"protected source",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="protected.wav",
+        detected_media_type="audio/wav",
+    )
+    shared_cue = storage.ingest(
+        b"shared cue",
+        logical_type=AssetType.CUE,
+        informative_name="shared.wav",
+        detected_media_type="audio/wav",
+    )
+
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        repository.create(
+            analysis_id="eligible",
+            source_asset_id=eligible_source.identifier,
+            cues=(
+                CueAssetReference(
+                    cue_id="eligible-cue", asset_id=shared_cue.identifier
+                ),
+            ),
+            effective_configuration=_configuration(),
+            queued_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        repository.create(
+            analysis_id="protected",
+            source_asset_id=protected_source.identifier,
+            cues=(
+                CueAssetReference(
+                    cue_id="protected-cue", asset_id=shared_cue.identifier
+                ),
+            ),
+            effective_configuration=_configuration(),
+            queued_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        repository.transition(
+            "eligible",
+            AnalysisLifecycleState.RUNNING,
+            at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        repository.transition(
+            "eligible",
+            AnalysisLifecycleState.SUCCEEDED,
+            at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            result_reference="result:eligible",
+        )
+        repository.transition(
+            "protected",
+            AnalysisLifecycleState.RUNNING,
+            at=datetime(2026, 1, 14, tzinfo=timezone.utc),
+        )
+
+        report = cleanup_expired_assets(repository, storage, now=NOW)
+
+        assert repository.get("eligible").state is AnalysisLifecycleState.SUCCEEDED
+        assert repository.get("protected").state is AnalysisLifecycleState.RUNNING
+
+    assert report.eligible_analysis_ids == ("eligible",)
+    assert report.deleted_asset_ids == (eligible_source.identifier,)
+    assert shared_cue.identifier not in report.deleted_asset_ids
+    with pytest.raises(AssetNotFoundError):
+        storage.read(eligible_source.identifier)
+    assert storage.read(protected_source.identifier) == b"protected source"
+    assert storage.read(shared_cue.identifier) == b"shared cue"
+    assert {path.name for path in storage_root.iterdir()} == {
+        protected_source.identifier,
+        shared_cue.identifier,
+    }

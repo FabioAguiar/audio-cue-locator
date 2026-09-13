@@ -18,13 +18,13 @@
     "github_role": "publication_target_or_human_reference"
   },
   "current_milestone": {
-    "id": "M4",
-    "title": "Lifecycle Persistente de Analysis",
+    "id": "M5",
+    "title": "REST API v1",
     "status": "active"
   },
   "last_completed_milestone": {
-    "id": "M3",
-    "title": "Modelo de Analysis e Resultados Estruturados",
+    "id": "M4",
+    "title": "Lifecycle Persistente de Analysis",
     "status": "completed"
   },
   "completed_milestones": [
@@ -42,6 +42,11 @@
       "id": "M3",
       "title": "Modelo de Analysis e Resultados Estruturados",
       "status": "completed"
+    },
+    {
+      "id": "M4",
+      "title": "Lifecycle Persistente de Analysis",
+      "status": "completed"
     }
   ],
   "locked_completed_milestones": [
@@ -58,6 +63,11 @@
     {
       "id": "M3",
       "title": "Modelo de Analysis e Resultados Estruturados",
+      "status": "locked"
+    },
+    {
+      "id": "M4",
+      "title": "Lifecycle Persistente de Analysis",
       "status": "locked"
     }
   ],
@@ -104,12 +114,12 @@
     {
       "id": "M4",
       "title": "Lifecycle Persistente de Analysis",
-      "status": "active"
+      "status": "completed"
     },
     {
       "id": "M5",
       "title": "REST API v1",
-      "status": "planned"
+      "status": "active"
     },
     {
       "id": "M6",
@@ -124,17 +134,17 @@
   ],
   "notes": [
     "This file records operational milestone state only.",
-    "M4 is the current active milestone for Lifecycle Persistente de Analysis in Audio Cue Locator.",
-    "M3 — Modelo de Analysis e Resultados Estruturados — is completed and is the last completed milestone.",
-    "M1, M2, and M3 are locked as completed milestones and require an explicit reopen record before any operational return to them.",
+    "M5 is the current active milestone for REST API v1 in Audio Cue Locator.",
+    "M4 — Lifecycle Persistente de Analysis — is completed and is the last completed milestone.",
+    "M1, M2, M3, and M4 are locked as completed milestones and require an explicit reopen record before any operational return to them.",
     "Formal issues are resolved from the support workspace using formal_issue_location patterns; GitHub is only a publication target or human reference.",
     "docs/milestones.md remains the planning document and must not be treated as the operational cursor.",
     "docs/architecture.md defines the implementation documentation strategy; this file only records milestone state.",
     "Issues, handoffs, workflows, and scripts may use this state as input for validation, but must not infer authorization to implement from this file alone.",
     "This file should remain in the audio-cue-locator repository at docs/project-status/milestone-state.json.",
-    "M4 depends on M3 being completed and on the Analysis and Result contracts being stable enough for local persistence and lifecycle execution.",
-    "M4 should be validated against docs/milestones.md before workflow continuation.",
-    "The current milestone points to M4 because the project has completed Modelo de Analysis e Resultados Estruturados and is advancing to Lifecycle Persistente de Analysis."
+    "M5 depends on M4 being completed and on the persistent Analysis lifecycle, local executor, Asset Storage, and Analysis Repository being available for API exposure.",
+    "M5 should be validated against docs/milestones.md before workflow continuation.",
+    "The current milestone points to M5 because the project has completed Lifecycle Persistente de Analysis and is advancing to REST API v1."
   ],
   "documentation_boundary": {
     "vision_document": "docs/vision.md",
