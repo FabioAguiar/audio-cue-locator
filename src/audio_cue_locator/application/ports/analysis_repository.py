@@ -50,6 +50,11 @@ were left `RUNNING` by a crash: no in-memory record of previously
 (`states/M4/M4-05/issue-operational-state.json`, gap G-01). It is
 read-only and confined to the same no-SQL-in-Application boundary as
 every other method here.
+
+`add_owned_asset` (M4-06) records an additional Asset identifier owned by an
+Analysis, such as a persisted derived artifact.  Source and Cue ownership
+continues to come from `source_asset_id` and `cues`; the new collection does
+not replace or reinterpret either existing field.
 """
 
 from __future__ import annotations
@@ -179,11 +184,13 @@ class AnalysisRecord:
 
     Fields are metadata only: `source_asset_id` and each `CueAssetReference.
     asset_id` are opaque M4-02 Asset identifiers, never media bytes or a
-    filesystem path; `effective_configuration` is the M3-02 snapshot
-    already attached to the Analysis, reused unchanged; `result_reference`
-    is an opaque pointer to an externally serialized `AnalysisResult`
-    (M3-06) -- this repository never stores or interprets the Result body
-    itself.
+    filesystem path. `owned_asset_ids` contains additional opaque Asset
+    identifiers explicitly linked to this Analysis, such as persisted derived
+    artifacts, without duplicating source or Cue references.
+    `effective_configuration` is the M3-02 snapshot already attached to the
+    Analysis, reused unchanged; `result_reference` is an opaque pointer to an
+    externally serialized `AnalysisResult` (M3-06) -- this repository never
+    stores or interprets the Result body itself.
 
     `structured_error` is present if, and only if, `state` is `FAILED`
     (`core.analysis_lifecycle.AnalysisLifecycleState.FAILED`), mirroring
@@ -202,6 +209,7 @@ class AnalysisRecord:
     lifecycle_timestamps: LifecycleTimestamps
     result_reference: str | None = None
     structured_error: StructuredError | None = None
+    owned_asset_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.analysis_id, str) or not self.analysis_id.strip():
@@ -232,6 +240,28 @@ class AnalysisRecord:
                     f"{cue_reference.cue_id!r}"
                 )
             seen_cue_ids.add(cue_reference.cue_id)
+        if not isinstance(self.owned_asset_ids, tuple):
+            raise InvalidAnalysisRecordError(
+                "AnalysisRecord.owned_asset_ids must be a tuple"
+            )
+        implicit_asset_ids = {
+            self.source_asset_id,
+            *(cue.asset_id for cue in self.cues),
+        }
+        seen_owned_asset_ids: set[str] = set()
+        for asset_id in self.owned_asset_ids:
+            validate_asset_identifier(asset_id)
+            if asset_id in seen_owned_asset_ids:
+                raise InvalidAnalysisRecordError(
+                    "duplicate Asset identifier in "
+                    f"AnalysisRecord.owned_asset_ids: {asset_id!r}"
+                )
+            if asset_id in implicit_asset_ids:
+                raise InvalidAnalysisRecordError(
+                    "AnalysisRecord.owned_asset_ids must contain only "
+                    "additional Assets, not source or Cue identifiers"
+                )
+            seen_owned_asset_ids.add(asset_id)
         if not isinstance(
             self.effective_configuration, EffectiveConfigurationSnapshot
         ):
@@ -297,6 +327,18 @@ class AnalysisRepositoryPort(Protocol):
     def get(self, analysis_id: str) -> AnalysisRecord:
         """Return the persisted record for `analysis_id`. Raises
         `AnalysisNotFoundError` if no such Analysis is persisted."""
+
+        ...
+
+    def add_owned_asset(self, analysis_id: str, asset_id: str) -> AnalysisRecord:
+        """Atomically record an additional Asset owned by ``analysis_id``.
+
+        The operation is idempotent.  Source and Cue Asset identifiers are
+        already ownership references, so supplying either returns the current
+        record without duplicating it in ``owned_asset_ids``. Additional
+        ownership must be recorded before the Analysis reaches a terminal
+        state, so its retention clock cannot predate the ownership link.
+        """
 
         ...
 

@@ -17,8 +17,9 @@ open by the M4-03 issue operational state
 
 - **Schema (G-01).** One table, `analyses`, keyed by `analysis_id`. Every
   structured value (`cues`, `effective_configuration`,
-  `lifecycle_timestamps`, `structured_error`) is stored as a `TEXT` column
-  holding JSON built from that value's own dataclass fields -- metadata
+  `lifecycle_timestamps`, `owned_asset_ids`, `structured_error`) is stored as
+  a `TEXT` column holding JSON built from that value's own dataclass fields --
+  metadata
   only, never a media byte or blob (`docs/architecture.md`, "Analysis
   Repository": "O banco não deve armazenar grandes blobs de mídia no
   baseline"). Every timestamp is stored as its timezone-aware ISO-8601
@@ -63,6 +64,11 @@ M4-05 startup-recovery discovery gap
 every enumeration query, like every other query in this module, confined to
 this one adapter.
 
+`add_owned_asset` and `owned_asset_ids_json` (M4-06) add the durable ownership
+link required for derived artifacts.  Adapter startup adds the non-null JSON
+column with an empty-array default to an existing M4-03 database, so legacy
+records remain readable without inventing an owner.
+
 Out of scope, unchanged from the port module: cancellation, a local
 executor, REST/WebUI exposure, a broker, distributed workers, and remote or
 object storage (`issues/M4/M4-03/formal-issue.json`, section 4).
@@ -83,6 +89,7 @@ from audio_cue_locator.application.ports.analysis_repository import (
     AnalysisNotFoundError,
     AnalysisRecord,
     CueAssetReference,
+    InvalidAnalysisRecordError,
     LifecycleTimestamps,
 )
 from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
@@ -97,6 +104,7 @@ from audio_cue_locator.core.analysis_result import (
     NormalizationSnapshot,
     StructuredError,
 )
+from audio_cue_locator.core.asset import validate_asset_identifier
 
 _BUSY_TIMEOUT_MS = 5_000
 """How long a second writer waits for `BEGIN IMMEDIATE` to acquire SQLite's
@@ -111,6 +119,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     cues_json TEXT NOT NULL,
     effective_configuration_json TEXT NOT NULL,
     lifecycle_timestamps_json TEXT NOT NULL,
+    owned_asset_ids_json TEXT NOT NULL DEFAULT '[]',
     result_reference TEXT,
     structured_error_json TEXT
 )
@@ -119,7 +128,7 @@ CREATE TABLE IF NOT EXISTS analyses (
 _SELECT_COLUMNS = (
     "analysis_id, state, source_asset_id, cues_json, "
     "effective_configuration_json, lifecycle_timestamps_json, "
-    "result_reference, structured_error_json"
+    "owned_asset_ids_json, result_reference, structured_error_json"
 )
 
 
@@ -134,6 +143,14 @@ def _deserialize_cues(text: str) -> tuple[CueAssetReference, ...]:
         CueAssetReference(cue_id=entry["cue_id"], asset_id=entry["asset_id"])
         for entry in json.loads(text)
     )
+
+
+def _serialize_owned_asset_ids(asset_ids: tuple[str, ...]) -> str:
+    return json.dumps(list(asset_ids))
+
+
+def _deserialize_owned_asset_ids(text: str) -> tuple[str, ...]:
+    return tuple(json.loads(text))
 
 
 def _serialize_configuration(configuration: EffectiveConfigurationSnapshot) -> str:
@@ -250,9 +267,9 @@ class SQLiteAnalysisRepository:
     """SQLite-backed implementation of `AnalysisRepositoryPort`.
 
     Structurally satisfies the `AnalysisRepositoryPort` Protocol (`create`,
-    `get`, `transition`, `list_by_state`); it does not import that Protocol
-    as a base class, matching how `core.asset.AssetStoragePort` is consumed
-    elsewhere in this codebase.
+    `get`, `add_owned_asset`, `transition`, `list_by_state`); it does not
+    import that Protocol as a base class, matching how
+    `core.asset.AssetStoragePort` is consumed elsewhere in this codebase.
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -263,6 +280,20 @@ class SQLiteAnalysisRepository:
         self._connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
         self._connection.execute("PRAGMA foreign_keys = ON")
         self._connection.execute(_CREATE_TABLE_SQL)
+        self._ensure_owned_asset_ids_column()
+
+    def _ensure_owned_asset_ids_column(self) -> None:
+        """Upgrade an existing M4-03 table without invalidating old rows."""
+
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(analyses)")
+        }
+        if "owned_asset_ids_json" not in columns:
+            self._connection.execute(
+                "ALTER TABLE analyses ADD COLUMN "
+                "owned_asset_ids_json TEXT NOT NULL DEFAULT '[]'"
+            )
 
     def close(self) -> None:
         """Close the owned connection. Safe to call more than once."""
@@ -311,8 +342,8 @@ class SQLiteAnalysisRepository:
                 "INSERT INTO analyses "
                 "(analysis_id, state, source_asset_id, cues_json, "
                 "effective_configuration_json, lifecycle_timestamps_json, "
-                "result_reference, structured_error_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "owned_asset_ids_json, result_reference, structured_error_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.analysis_id,
                     record.state.value,
@@ -320,6 +351,7 @@ class SQLiteAnalysisRepository:
                     _serialize_cues(record.cues),
                     _serialize_configuration(record.effective_configuration),
                     _serialize_timestamps(record.lifecycle_timestamps),
+                    _serialize_owned_asset_ids(record.owned_asset_ids),
                     record.result_reference,
                     _serialize_structured_error(record.structured_error),
                 ),
@@ -340,6 +372,59 @@ class SQLiteAnalysisRepository:
                 f"no Analysis persisted for {analysis_id!r}"
             )
         return self._row_to_record(row)
+
+    def add_owned_asset(self, analysis_id: str, asset_id: str) -> AnalysisRecord:
+        validate_asset_identifier(asset_id)
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._connection.execute(
+                f"SELECT {_SELECT_COLUMNS} FROM analyses WHERE analysis_id = ?",
+                (analysis_id,),
+            ).fetchone()
+            if row is None:
+                raise AnalysisNotFoundError(
+                    f"no Analysis persisted for {analysis_id!r}"
+                )
+            current = self._row_to_record(row)
+            implicit_asset_ids = {
+                current.source_asset_id,
+                *(cue.asset_id for cue in current.cues),
+            }
+            if asset_id in implicit_asset_ids or asset_id in current.owned_asset_ids:
+                updated = current
+            elif current.state in {
+                AnalysisLifecycleState.SUCCEEDED,
+                AnalysisLifecycleState.FAILED,
+            }:
+                raise InvalidAnalysisRecordError(
+                    "additional Asset ownership must be recorded before "
+                    "the Analysis reaches a terminal state"
+                )
+            else:
+                updated = AnalysisRecord(
+                    analysis_id=current.analysis_id,
+                    state=current.state,
+                    source_asset_id=current.source_asset_id,
+                    cues=current.cues,
+                    effective_configuration=current.effective_configuration,
+                    lifecycle_timestamps=current.lifecycle_timestamps,
+                    owned_asset_ids=(*current.owned_asset_ids, asset_id),
+                    result_reference=current.result_reference,
+                    structured_error=current.structured_error,
+                )
+                self._connection.execute(
+                    "UPDATE analyses SET owned_asset_ids_json = ? "
+                    "WHERE analysis_id = ?",
+                    (
+                        _serialize_owned_asset_ids(updated.owned_asset_ids),
+                        updated.analysis_id,
+                    ),
+                )
+        except BaseException:
+            self._connection.execute("ROLLBACK")
+            raise
+        self._connection.execute("COMMIT")
+        return updated
 
     def transition(
         self,
@@ -376,6 +461,7 @@ class SQLiteAnalysisRepository:
                 lifecycle_timestamps=current.lifecycle_timestamps.with_state_reached(
                     to_state, at
                 ),
+                owned_asset_ids=current.owned_asset_ids,
                 result_reference=(
                     result_reference
                     if result_reference is not None
@@ -419,6 +505,7 @@ class SQLiteAnalysisRepository:
             cues_json,
             effective_configuration_json,
             lifecycle_timestamps_json,
+            owned_asset_ids_json,
             result_reference,
             structured_error_json,
         ) = row
@@ -431,6 +518,7 @@ class SQLiteAnalysisRepository:
                 effective_configuration_json
             ),
             lifecycle_timestamps=_deserialize_timestamps(lifecycle_timestamps_json),
+            owned_asset_ids=_deserialize_owned_asset_ids(owned_asset_ids_json),
             result_reference=result_reference,
             structured_error=_deserialize_structured_error(structured_error_json),
         )

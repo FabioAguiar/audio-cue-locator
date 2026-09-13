@@ -199,7 +199,7 @@ class Asset:
 
 @runtime_checkable
 class AssetStoragePort(Protocol):
-    """Application-facing port for ingesting and resolving Asset bytes.
+    """Application-facing port for ingesting, resolving, and deleting bytes.
 
     No method accepts a destination path.  ``informative_name`` is metadata,
     while the implementation generates the identifier that keys storage.
@@ -219,5 +219,15 @@ class AssetStoragePort(Protocol):
 
     def read(self, identifier: str) -> bytes:
         """Return bytes addressed exclusively by an internal identifier."""
+
+        ...
+
+    def delete(self, identifier: str) -> bool:
+        """Delete bytes addressed exclusively by an internal identifier.
+
+        Return ``True`` when bytes were removed and ``False`` when the
+        identifier was already absent.  Implementations must apply the same
+        identifier and storage-boundary checks used by ``read``.
+        """
 
         ...

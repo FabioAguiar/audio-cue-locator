@@ -101,6 +101,21 @@ class LocalFilesystemAssetStorage(AssetStoragePort):
                 f"No Asset bytes exist for identifier {identifier!r}"
             ) from None
 
+    def delete(self, identifier: str) -> bool:
+        """Delete bytes by canonical internal identifier only.
+
+        Deletion is idempotent so a cleanup pass can be safely retried after
+        an interruption.  Identifier validation, symlink rejection, and root
+        containment are completed before ``unlink`` is attempted.
+        """
+
+        storage_path = self._path_for(identifier)
+        try:
+            storage_path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
     def _path_for(self, identifier: str) -> Path:
         """Resolve a validated identifier beneath the configured root.
 
@@ -111,6 +126,10 @@ class LocalFilesystemAssetStorage(AssetStoragePort):
 
         storage_key = validate_asset_identifier(identifier)
         candidate = self._base_directory / storage_key
+        if candidate.is_symlink():
+            raise UnsafeStoragePathError(
+                "Identifier-derived Asset path must not be a symbolic link"
+            )
         resolved_candidate = candidate.resolve(strict=False)
         try:
             resolved_candidate.relative_to(self._base_directory)

@@ -13,7 +13,8 @@ The executable contract is split across two authorized modules:
 - `src/audio_cue_locator/application/ports/analysis_repository.py` defines
   the persisted value types (`AnalysisRecord`, `CueAssetReference`,
   `LifecycleTimestamps`) and the Application-facing `AnalysisRepositoryPort`
-  Protocol (`create`, `get`, `transition`).
+  Protocol (`create`, `get`, `add_owned_asset`, `transition`,
+  `list_by_state`).
 - `src/audio_cue_locator/infrastructure/analysis_repository/
   sqlite_repository.py` implements that port against a local, file-backed
   SQLite database.
@@ -48,6 +49,7 @@ identifiers this repository stores as text
 | `lifecycle_timestamps` | A `LifecycleTimestamps` value: one optional, timezone-aware `datetime` per `AnalysisLifecycleState` member, present for every state actually reached so far. |
 | `result_reference` | Optional opaque string pointing at an externally serialized `AnalysisResult` (M3-06); this repository never stores or interprets the Result body itself. |
 | `structured_error` | Optional `StructuredError` (`core.analysis_result`); present if, and only if, `state` is `failed`. |
+| `owned_asset_ids` | Tuple of additional M4-02 Asset identifiers owned by this Analysis, such as persisted derived artifacts. Source and Cue identifiers remain represented by `source_asset_id` and `cues` and cannot be duplicated here. Defaults to an empty tuple for legacy records. |
 
 `AnalysisRecord.__post_init__` enforces every invariant above, including the
 `state == failed <=> structured_error is not None` rule and that
@@ -57,7 +59,7 @@ invalid shape can never reach the database layer in the first place.
 
 ## `AnalysisRepositoryPort`
 
-The port exposes exactly three operations:
+The port exposes five operations:
 
 - `create(*, analysis_id, source_asset_id, cues, effective_configuration,
   queued_at) -> AnalysisRecord` — persists a new Analysis in the `queued`
@@ -65,6 +67,12 @@ The port exposes exactly three operations:
   identifies a persisted Analysis; this is not an upsert.
 - `get(analysis_id) -> AnalysisRecord` — returns the persisted record.
   Raises `AnalysisNotFoundError` if none exists.
+- `add_owned_asset(analysis_id, asset_id) -> AnalysisRecord` — atomically and
+  idempotently records an additional Asset owned by the Analysis. Passing its
+  existing source or Cue Asset identifier returns the current record without
+  duplicating the implicit ownership reference. Additional ownership must be
+  recorded before the Analysis becomes terminal, ensuring the terminal-state
+  retention clock never predates a newly linked Asset.
 - `transition(analysis_id, to_state, *, at, result_reference=None,
   structured_error=None) -> AnalysisRecord` — validates the stored current
   state against `to_state` using the unmodified Core function
@@ -75,6 +83,8 @@ The port exposes exactly three operations:
   `core.analysis_lifecycle.InvalidLifecycleTransitionError` — reused, not
   redefined — if the stored current state does not permit `to_state`. A
   rejected transition leaves the stored record completely unchanged.
+- `list_by_state(state) -> tuple[AnalysisRecord, ...]` — returns persisted
+  records in the requested M4-01 state without exposing SQL to Application.
 
 No method accepts a SQL fragment, a connection, or a filesystem path.
 
@@ -90,6 +100,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     cues_json TEXT NOT NULL,
     effective_configuration_json TEXT NOT NULL,
     lifecycle_timestamps_json TEXT NOT NULL,
+    owned_asset_ids_json TEXT NOT NULL DEFAULT '[]',
     result_reference TEXT,
     structured_error_json TEXT
 )
@@ -103,6 +114,7 @@ CREATE TABLE IF NOT EXISTS analyses (
 | `cues_json` | JSON array of `{"cue_id": ..., "asset_id": ...}` objects, in the record's original cue order. |
 | `effective_configuration_json` | JSON object mirroring `EffectiveConfigurationSnapshot`'s field structure (`canonicalization`, `matching`, `configuration_source_name`). |
 | `lifecycle_timestamps_json` | JSON object with one key per lifecycle state (`queued_at`, `running_at`, `succeeded_at`, `failed_at`), each a timezone-aware ISO-8601 string or `null`. |
+| `owned_asset_ids_json` | JSON array of additional M4-02 Asset identifier strings, in insertion order. An empty array means no additional persisted ownership links. |
 | `result_reference` | Verbatim opaque string, or `NULL` when absent. |
 | `structured_error_json` | JSON object `{"category": ..., "message": ...}`, or `NULL` when the Analysis has not failed. |
 
@@ -122,10 +134,13 @@ convention to get wrong.
 ### Migrations and versioning
 
 The schema is created with `CREATE TABLE IF NOT EXISTS` on every adapter
-construction; there is no separate migration runner or schema-version
-column in this initial contract. A future incompatible schema change is
-expected to introduce an explicit versioning mechanism rather than silently
-altering the columns above under the same table name.
+construction. M4-06 adds the compatible `owned_asset_ids_json` column on
+adapter startup when an existing M4-03 table does not yet contain it, using
+`TEXT NOT NULL DEFAULT '[]'`. Existing rows therefore deserialize with no
+additional owned Assets, while new and updated rows round-trip explicit
+ownership. There is still no separate migration runner or schema-version
+column; a future incompatible change is expected to introduce explicit
+versioning rather than silently altering the contract.
 
 ## Transaction and concurrency behavior
 
@@ -169,7 +184,11 @@ interpolated into SQL text.
 The separate ASF test phase should cover at least:
 
 - round-trip persistence of every `AnalysisRecord` field, including the
-  nullable `result_reference` and `structured_error`;
+  `owned_asset_ids` collection and nullable `result_reference` and
+  `structured_error`;
+- migration of an existing M4-03 row to an empty `owned_asset_ids` collection;
+- idempotent additional-Asset ownership recording and preservation of that
+  collection across lifecycle transitions;
 - that allowed M4-01 transitions persist and disallowed transitions raise
   `InvalidLifecycleTransitionError` without changing the stored record;
 - that SQL and `sqlite3` types do not leak into Application (import/dependency
