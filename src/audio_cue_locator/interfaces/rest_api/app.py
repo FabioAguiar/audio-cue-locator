@@ -74,6 +74,12 @@ strictly before constructing `LocalAnalysisExecutor`, so recovery always
 runs before any `QUEUED` Analysis can be claimed. See
 `docs/retention-and-cleanup.md` for the applied wiring order and the
 startup-only trigger decision.
+
+As of M7-04, `create_app()` also calls `observability.configure_logging`
+exactly once, before constructing `FastAPI`, so every diagnostic event the
+new `observability` package's other authorized call sites emit already
+has a configured destination and level before this process serves its
+first request. See `docs/observability.md` for the emitted event schema.
 """
 
 from __future__ import annotations
@@ -132,6 +138,7 @@ from audio_cue_locator.interfaces.rest_api.schemas import (
     AssetPublic,
     ErrorPublic,
 )
+from audio_cue_locator.observability import configure_logging
 
 API_VERSION = "v1"
 API_V1_PREFIX = f"/api/{API_VERSION}"
@@ -181,6 +188,18 @@ _MAX_SOURCE_MEDIA_DURATION_SECONDS_ENV = (
     "AUDIO_CUE_LOCATOR_MAX_SOURCE_MEDIA_DURATION_SECONDS"
 )
 _MAX_CUE_MEDIA_DURATION_SECONDS_ENV = "AUDIO_CUE_LOCATOR_MAX_CUE_MEDIA_DURATION_SECONDS"
+_LOG_LEVEL_ENV = "AUDIO_CUE_LOCATOR_LOG_LEVEL"
+_DEFAULT_LOG_LEVEL = "INFO"
+
+
+def _log_level() -> str:
+    """Explicit, environment-overridable diagnostic-logging level (M7-04),
+    layered over `_DEFAULT_LOG_LEVEL`, following the same per-file
+    configuration convention already used by `_ffmpeg_timeout_seconds`/
+    `_max_concurrency` above."""
+
+    configured = os.environ.get(_LOG_LEVEL_ENV)
+    return configured if configured else _DEFAULT_LOG_LEVEL
 
 
 def _asset_storage_root() -> Path:
@@ -434,6 +453,7 @@ def create_app() -> FastAPI:
     sharing this module's mutable `app.openapi_schema` cache.
     """
 
+    configure_logging(level=_log_level())
     app = FastAPI(
         title="Audio Cue Locator API",
         version=API_VERSION,

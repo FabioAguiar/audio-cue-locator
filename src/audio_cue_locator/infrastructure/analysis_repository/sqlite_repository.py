@@ -92,7 +92,10 @@ from audio_cue_locator.application.ports.analysis_repository import (
     InvalidAnalysisRecordError,
     LifecycleTimestamps,
 )
-from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
+from audio_cue_locator.core.analysis_lifecycle import (
+    AnalysisLifecycleState,
+    InvalidLifecycleTransitionError,
+)
 from audio_cue_locator.core.analysis_lifecycle import (
     transition as validate_lifecycle_transition,
 )
@@ -105,11 +108,28 @@ from audio_cue_locator.core.analysis_result import (
     StructuredError,
 )
 from audio_cue_locator.core.asset import validate_asset_identifier
+from audio_cue_locator.observability import emit_diagnostic_event
 
 _BUSY_TIMEOUT_MS = 5_000
 """How long a second writer waits for `BEGIN IMMEDIATE` to acquire SQLite's
 single write lock before raising `sqlite3.OperationalError` (G-04
 conflict-behavior decision, documented in the module docstring above)."""
+
+_EXPECTED_REJECTIONS: tuple[type[BaseException], ...] = (
+    AnalysisAlreadyExistsError,
+    AnalysisNotFoundError,
+    InvalidAnalysisRecordError,
+    InvalidLifecycleTransitionError,
+)
+"""M7-04: exception types each `except BaseException` block below already
+raises deliberately as an ordinary, expected outcome (an already-existing
+Analysis, a missing one, an invalid record, or a rejected lifecycle
+transition -- the normal shape of, for example, two workers racing to
+claim the same Analysis). These are business-rule rejections, not
+persistence-layer failures, so they are excluded from the
+`analysis_persistence_write_failed` diagnostic event emitted for every
+other, genuinely unexpected exception (for example a `sqlite3.
+OperationalError`/`ProgrammingError`)."""
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS analyses (
@@ -356,8 +376,16 @@ class SQLiteAnalysisRepository:
                     _serialize_structured_error(record.structured_error),
                 ),
             )
-        except BaseException:
+        except BaseException as exc:
             self._connection.execute("ROLLBACK")
+            if not isinstance(exc, _EXPECTED_REJECTIONS):
+                emit_diagnostic_event(
+                    event="analysis_persistence_write_failed",
+                    boundary="persistence",
+                    outcome="failed",
+                    category=type(exc).__name__,
+                    analysis_id=analysis_id,
+                )
             raise
         self._connection.execute("COMMIT")
         return record
@@ -420,8 +448,16 @@ class SQLiteAnalysisRepository:
                         updated.analysis_id,
                     ),
                 )
-        except BaseException:
+        except BaseException as exc:
             self._connection.execute("ROLLBACK")
+            if not isinstance(exc, _EXPECTED_REJECTIONS):
+                emit_diagnostic_event(
+                    event="analysis_persistence_write_failed",
+                    boundary="persistence",
+                    outcome="failed",
+                    category=type(exc).__name__,
+                    analysis_id=analysis_id,
+                )
             raise
         self._connection.execute("COMMIT")
         return updated
@@ -482,8 +518,16 @@ class SQLiteAnalysisRepository:
                     new_record.analysis_id,
                 ),
             )
-        except BaseException:
+        except BaseException as exc:
             self._connection.execute("ROLLBACK")
+            if not isinstance(exc, _EXPECTED_REJECTIONS):
+                emit_diagnostic_event(
+                    event="analysis_persistence_write_failed",
+                    boundary="persistence",
+                    outcome="failed",
+                    category=type(exc).__name__,
+                    analysis_id=analysis_id,
+                )
             raise
         self._connection.execute("COMMIT")
         return new_record

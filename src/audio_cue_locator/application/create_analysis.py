@@ -150,6 +150,7 @@ from audio_cue_locator.infrastructure.media_processing.errors import (
 from audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter import (
     FFmpegMediaAdapter,
 )
+from audio_cue_locator.observability import emit_diagnostic_event
 
 DEFAULT_MAX_CUE_COUNT = 20
 """Explicit, configurable maximum cue count per Analysis creation request
@@ -515,25 +516,40 @@ class CreateAnalysisUseCase:
                 f"maximum of {self._max_cue_count}"
             )
 
-        canonical_source = self._resolve_and_canonicalize(
-            source_asset_id,
-            allowed_media_types=SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES,
-            role="source_asset_id",
-            max_duration_seconds=self._max_source_media_duration_seconds,
-        )
+        try:
+            canonical_source = self._resolve_and_canonicalize(
+                source_asset_id,
+                allowed_media_types=SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES,
+                role="source_asset_id",
+                max_duration_seconds=self._max_source_media_duration_seconds,
+            )
 
-        cue_references: list[CueAssetReference] = []
-        canonical_cues: dict[str, np.ndarray] = {}
-        for cue in cues:
-            canonical_cues[cue.cue_id] = self._resolve_and_canonicalize(
-                cue.asset_id,
-                allowed_media_types=CUE_SUPPORTED_MEDIA_TYPES,
-                role=f"cues[{cue.cue_id!r}].asset_id",
-                max_duration_seconds=self._max_cue_media_duration_seconds,
+            cue_references: list[CueAssetReference] = []
+            canonical_cues: dict[str, np.ndarray] = {}
+            for cue in cues:
+                canonical_cues[cue.cue_id] = self._resolve_and_canonicalize(
+                    cue.asset_id,
+                    allowed_media_types=CUE_SUPPORTED_MEDIA_TYPES,
+                    role=f"cues[{cue.cue_id!r}].asset_id",
+                    max_duration_seconds=self._max_cue_media_duration_seconds,
+                )
+                cue_references.append(
+                    CueAssetReference(cue_id=cue.cue_id, asset_id=cue.asset_id)
+                )
+        except Exception as exc:
+            # M7-04: application/media-processing boundary diagnostic.
+            # analysis_id is never available here: every rejection this
+            # `except` observes happens before `AnalysisRepositoryPort.
+            # create` ever persists a record (this method's own docstring,
+            # "before ... ever called"), so no Analysis identifier exists
+            # yet to attach.
+            emit_diagnostic_event(
+                event="media_canonicalization_failed",
+                boundary="media_processing",
+                outcome="failed",
+                category=type(exc).__name__,
             )
-            cue_references.append(
-                CueAssetReference(cue_id=cue.cue_id, asset_id=cue.asset_id)
-            )
+            raise
 
         analysis_id = str(uuid4())
         record = self._repository.create(

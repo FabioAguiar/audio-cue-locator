@@ -175,6 +175,21 @@ class LifecycleTimestamps:
         values[field_name] = at
         return LifecycleTimestamps(**values)
 
+    def duration_seconds(self, state: AnalysisLifecycleState) -> float | None:
+        """Return the elapsed seconds between `queued_at` and the recorded
+        timestamp for `state`, or `None` if the Analysis has not yet
+        reached `state` (M7-04: coarse per-Analysis stage duration, reused
+        directly from these already-persisted timestamps rather than a
+        second, independent timing mechanism -- see
+        `states/M7/M7-04/issue-operational-state.json#/known_facts/2`).
+        `state` is typically `RUNNING`, `SUCCEEDED`, or `FAILED`; calling
+        this with `QUEUED` always returns `0.0`."""
+
+        reached_at = self.at(state)
+        if reached_at is None:
+            return None
+        return (reached_at - self.queued_at).total_seconds()
+
 
 @dataclass(frozen=True)
 class AnalysisRecord:

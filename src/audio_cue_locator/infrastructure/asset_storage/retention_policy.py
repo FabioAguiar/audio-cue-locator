@@ -23,6 +23,7 @@ from audio_cue_locator.application.ports.analysis_repository import (
 )
 from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
 from audio_cue_locator.core.asset import AssetStoragePort
+from audio_cue_locator.observability import emit_diagnostic_event
 
 MINIMUM_RETENTION_WINDOW = timedelta(days=7)
 """Shortest permitted window for uploads and persisted owned artifacts."""
@@ -108,7 +109,7 @@ def cleanup_expired_assets(
                 "AssetStoragePort.delete must return a boolean"
             )
 
-    return CleanupReport(
+    report = CleanupReport(
         eligible_analysis_ids=tuple(
             sorted(record.analysis_id for record in eligible_records)
         ),
@@ -116,6 +117,19 @@ def cleanup_expired_assets(
         missing_asset_ids=tuple(missing),
         preserved_asset_ids=tuple(preserved),
     )
+    # M7-04: one pass-level diagnostic event per cleanup run, derived only
+    # from this report's own counts -- never a per-Asset identifier list
+    # (`states/M7/M7-04/issue-operational-state.json#/known_facts/11`,
+    # gap G3). `count` reports how many Assets were actually deleted this
+    # pass; a missing/preserved distinction, if needed, belongs to a
+    # future issue's own reduced evidence, not this diagnostic event.
+    emit_diagnostic_event(
+        event="asset_retention_cleanup_completed",
+        boundary="cleanup",
+        outcome="succeeded",
+        count=len(report.deleted_asset_ids),
+    )
+    return report
 
 
 def _validate_inputs(now: datetime, retention_window: timedelta) -> None:

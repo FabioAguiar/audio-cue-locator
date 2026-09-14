@@ -147,6 +147,20 @@ from audio_cue_locator.core.analysis_result import (
     serialize_analysis_result,
 )
 from audio_cue_locator.infrastructure.acoustic_matching import EffectiveConfiguration
+from audio_cue_locator.observability import emit_diagnostic_event
+
+_SAFE_MATCHING_STAGE_FAILURE_MESSAGE = (
+    "The matching stage failed due to an unexpected internal error."
+)
+"""The only message text ever persisted for a matching-stage failure
+(M7-04). Replaces this module's previous `f"{type(exc).__name__}: {exc}"`,
+which persisted, and then leaked through `interfaces.rest_api.schemas.
+analysis_record_to_public` to the public REST API and WebUI, the caught
+exception's own raw text verbatim
+(`states/M7/M7-04/issue-operational-state.json#/risks/0`). `schemas.py`
+also independently redacts `structured_error.message` before any value --
+including this one -- reaches a client, so this fix and that one are
+deliberate defense-in-depth, not alternatives."""
 
 DEFAULT_MAX_CONCURRENCY = 4
 """Provisional in-process concurrency bound used only to size the default
@@ -167,6 +181,14 @@ def _default_clock() -> datetime:
     timestamp be timezone-aware."""
 
     return datetime.now(timezone.utc)
+
+
+def _to_duration_ms(duration_seconds: float | None) -> float | None:
+    """Convert `LifecycleTimestamps.duration_seconds`'s seconds-based
+    result to the milliseconds `observability.events.emit_diagnostic_event`
+    expects, preserving `None` (M7-04)."""
+
+    return duration_seconds * 1000.0 if duration_seconds is not None else None
 
 
 @runtime_checkable
@@ -449,16 +471,30 @@ class LocalAnalysisExecutor:
             # failure, distinct from a per-cue CueFailure: it prevented the
             # whole run, so it becomes the Analysis's own structured_error
             # rather than a fabricated per-cue outcome (acceptance
-            # criterion 3).
+            # criterion 3). The persisted message is a fixed, safe
+            # constant (M7-04) -- never the caught exception's own raw
+            # text (see `_SAFE_MATCHING_STAGE_FAILURE_MESSAGE`'s docstring).
             structured_error = StructuredError(
                 category=FailureCategory.INTERNAL_FAILURE,
-                message=f"{type(exc).__name__}: {exc}",
+                message=_SAFE_MATCHING_STAGE_FAILURE_MESSAGE,
             )
             failed_record = self._repository.transition(
                 analysis_id,
                 AnalysisLifecycleState.FAILED,
                 at=self._clock(),
                 structured_error=structured_error,
+            )
+            emit_diagnostic_event(
+                event="matching_stage_failed",
+                boundary="executor",
+                outcome="failed",
+                category=type(exc).__name__,
+                analysis_id=analysis_id,
+                duration_ms=_to_duration_ms(
+                    failed_record.lifecycle_timestamps.duration_seconds(
+                        AnalysisLifecycleState.FAILED
+                    )
+                ),
             )
             return ExecutionOutcome(
                 analysis_id=analysis_id,
@@ -473,6 +509,17 @@ class LocalAnalysisExecutor:
             AnalysisLifecycleState.SUCCEEDED,
             at=self._clock(),
             result_reference=result_reference,
+        )
+        emit_diagnostic_event(
+            event="analysis_execution_succeeded",
+            boundary="executor",
+            outcome="succeeded",
+            analysis_id=analysis_id,
+            duration_ms=_to_duration_ms(
+                succeeded_record.lifecycle_timestamps.duration_seconds(
+                    AnalysisLifecycleState.SUCCEEDED
+                )
+            ),
         )
         return ExecutionOutcome(
             analysis_id=analysis_id,

@@ -197,7 +197,16 @@ class AnalysisFailureCategory(str, Enum):
 class AnalysisStructuredError(_ForbidExtraModel):
     """Public projection of one `core.analysis_result.StructuredError`.
     Present on `AnalysisPublic` if, and only if, `status` is `failed`,
-    mirroring `AnalysisRecord`'s own invariant."""
+    mirroring `AnalysisRecord`'s own invariant.
+
+    `message` is always one of `SAFE_ANALYSIS_ERROR_MESSAGES`'s small,
+    fixed per-category strings (M7-04) -- never the persisted
+    `StructuredError.message` value itself. This mirrors
+    `interfaces.rest_api.errors.SAFE_MESSAGES`'s own established pattern
+    for `ErrorPublic`, extended here as defense-in-depth: independently of
+    whatever a future `StructuredError` producer persists,
+    `analysis_record_to_public` never copies that value into this public
+    field (`states/M7/M7-04/issue-operational-state.json#/risks/0`)."""
 
     category: AnalysisFailureCategory
     message: str = Field(..., min_length=1)
@@ -241,6 +250,32 @@ class AnalysisPublic(_ForbidExtraModel):
     structured_error: AnalysisStructuredError | None = None
 
 
+SAFE_ANALYSIS_ERROR_MESSAGES: dict[AnalysisFailureCategory, str] = {
+    AnalysisFailureCategory.INVALID_INPUT: "The Analysis request was invalid.",
+    AnalysisFailureCategory.UNSUPPORTED_MEDIA: (
+        "The submitted media is not supported."
+    ),
+    AnalysisFailureCategory.DECODE_OR_CANONICALIZATION_FAILURE: (
+        "The submitted media could not be decoded or canonicalized."
+    ),
+    AnalysisFailureCategory.MATCHING_FAILURE: (
+        "Acoustic matching could not complete for this Analysis."
+    ),
+    AnalysisFailureCategory.RESOURCE_LIMIT: (
+        "This Analysis exceeded an allowed resource limit."
+    ),
+    AnalysisFailureCategory.INTERNAL_FAILURE: (
+        "This Analysis failed due to an unexpected internal error."
+    ),
+}
+"""The only text a client ever sees for each `AnalysisFailureCategory`
+(M7-04), mirroring `interfaces.rest_api.errors.SAFE_MESSAGES`'s own
+pattern. Never derived from `StructuredError.message`, so a persisted
+message's own content -- current or future -- can never become a client-
+visible (or accidentally sensitive) value; see `AnalysisStructuredError`'s
+docstring."""
+
+
 def analysis_record_to_public(record: AnalysisRecord) -> AnalysisPublic:
     """Map an Application `AnalysisRecord` to its public v1 representation.
 
@@ -253,9 +288,10 @@ def analysis_record_to_public(record: AnalysisRecord) -> AnalysisPublic:
 
     structured_error = None
     if record.structured_error is not None:
+        category = AnalysisFailureCategory(record.structured_error.category.value)
         structured_error = AnalysisStructuredError(
-            category=AnalysisFailureCategory(record.structured_error.category.value),
-            message=record.structured_error.message,
+            category=category,
+            message=SAFE_ANALYSIS_ERROR_MESSAGES[category],
         )
 
     return AnalysisPublic(

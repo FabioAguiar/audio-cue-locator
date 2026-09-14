@@ -81,6 +81,7 @@ from audio_cue_locator.core.asset import (
     InvalidAssetMetadataError,
 )
 from audio_cue_locator.interfaces.rest_api.schemas import ErrorCode, ErrorPublic
+from audio_cue_locator.observability import emit_diagnostic_event
 
 
 class UnsupportedMediaError(ValueError):
@@ -169,11 +170,32 @@ def _correlation_id() -> str:
     return uuid.uuid4().hex
 
 
-def _error_response(error_code: ErrorCode, http_status: int) -> JSONResponse:
+def _error_response(
+    error_code: ErrorCode, http_status: int, exc: Exception | None = None
+) -> JSONResponse:
+    correlation_id = _correlation_id()
     payload = ErrorPublic(
         error_code=error_code,
         message=SAFE_MESSAGES[error_code],
-        correlation_id=_correlation_id(),
+        correlation_id=correlation_id,
+    )
+    # M7-04: reconciles this envelope's own per-response correlation_id
+    # with analysis_id, when the caught exception already carries one as
+    # an attribute (for example `AnalysisAlreadyClaimedError`) -- the two
+    # previously disconnected correlation identifiers this issue's own
+    # state required addressing
+    # (`states/M7/M7-04/issue-operational-state.json#/risks/3`, gap G4).
+    # `category` reuses this response's own closed `ErrorCode` value
+    # rather than the caught exception's type or message, so no
+    # additional diagnostic taxonomy is introduced at this boundary.
+    analysis_id = getattr(exc, "analysis_id", None) if exc is not None else None
+    emit_diagnostic_event(
+        event="api_request_failed",
+        boundary="api",
+        outcome="failed",
+        category=error_code.value,
+        analysis_id=analysis_id if isinstance(analysis_id, str) else None,
+        correlation_id=correlation_id,
     )
     return JSONResponse(status_code=http_status, content=payload.model_dump(mode="json"))
 
@@ -195,13 +217,13 @@ def install_error_handlers(app: FastAPI) -> None:
             error_code: ErrorCode = error_code,
             http_status: int = http_status,
         ) -> JSONResponse:
-            return _error_response(error_code, http_status)
+            return _error_response(error_code, http_status, exc)
 
         app.add_exception_handler(exception_type, _mapped_handler)
 
     def _unexpected_handler(request: Request, exc: Exception) -> JSONResponse:
         return _error_response(
-            ErrorCode.INTERNAL_ERROR, status.HTTP_500_INTERNAL_SERVER_ERROR
+            ErrorCode.INTERNAL_ERROR, status.HTTP_500_INTERNAL_SERVER_ERROR, exc
         )
 
     app.add_exception_handler(Exception, _unexpected_handler)
