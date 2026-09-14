@@ -40,10 +40,11 @@ export type AnalysisStatus = "queued" | "running" | "succeeded" | "failed";
 
 /** S0003 adds `label` (optional, presentation-only) and
  * `trim_start_seconds`/`trim_end_seconds` (optional Cue-local processing
- * bounds, half-open `[start, end)`, in seconds). This type change only
- * — no S0003 WebUI redesign is performed here; `NewAnalysisPage.tsx`
- * still sends/reads only `cue_id`/`asset_id`, which remains valid since
- * every new field is optional. */
+ * bounds, half-open `[start, end)`, in seconds). S0004 (`specs/S0004-
+ * responsive-single-screen-home-design-convergence/spec.md`) binds these
+ * fields in `NewAnalysisPage.tsx`'s per-cue Name/Start time/End time
+ * inputs; every field here remains optional since a cue may still omit
+ * them. */
 export interface AnalysisCueReference {
   cue_id: string;
   asset_id: string;

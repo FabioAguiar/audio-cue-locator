@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-import { ApiNetworkError, ErrorPublic } from "../api/client";
+import { AnalysisPublic, ApiNetworkError, ErrorPublic } from "../api/client";
 import {
   AnalysisResultEnvelope,
   CueResult,
@@ -8,41 +8,35 @@ import {
   downloadAnalysisResultText,
   fetchAnalysisResult,
 } from "../api/downloadResult";
-import { useAnalysisPolling } from "../hooks/useAnalysisPolling";
 
 /**
- * Results view for an Analysis identified by `analysisId`: lists every
- * cue's outcome once the Analysis reaches `succeeded`, shows the
- * already-polled `structured_error` once it reaches `failed`, and offers
- * a byte-identical download of the Result JSON (M6-03,
- * `intents/M6/M6-03/implementation-handoff.json`).
+ * Results as the conditional third Home card (S0004,
+ * `specs/S0004-responsive-single-screen-home-design-convergence/spec.md`).
  *
- * Scope, exactly as authorized:
- * - Reuse `useAnalysisPolling` (M6-02) to obtain the terminal
- *   `AnalysisPublic`; never poll or infer lifecycle state independently.
- * - Call `GET /api/v1/analyses/{analysis_id}/result` only once status is
- *   `succeeded`; never while `queued`/`running`, and never at all when
- *   `failed` (decisions[3]) -- a `failed` Analysis's outcome comes only
- *   from its already-polled `structured_error`.
- * - Render three structurally distinct terminal outcomes: analysis-level
- *   `failed`, cue-level `no_match`, and cue-level `failure` (decisions[2]);
- *   none is visually or structurally conflated with another.
- * - Present every score using its raw value next to an explicit method
- *   label, never as "confidence" or a percentage (decisions[0]).
- * - Serve the download from the exact raw response text captured by
- *   `downloadResult.ts`, never a re-serialization of the parsed object
- *   (decisions[1]).
+ * This component no longer polls independently: `NewAnalysisPage` is the
+ * single `useAnalysisPolling` owner and passes the current `AnalysisPublic`
+ * (or its absence/error) down as props. This component still owns fetching
+ * `GET /api/v1/analyses/{analysis_id}/result` exactly once the passed-in
+ * `analysis.status` reaches `succeeded`, and still serves the download from
+ * the exact raw response text captured by `downloadResult.ts` -- never a
+ * re-serialization of the parsed object.
  *
- * Explicitly out of scope: any temporal/timeline visualization (M6-04),
- * a media player/waveform view, and recomputing or relabeling the score.
- * This component is not yet mounted by `webui/src/main.tsx`: wiring it
- * into the application shell is outside this issue's authorized edit
- * paths, mirroring M6-02's own `NewAnalysisPage.tsx`, which also remains
- * unmounted after that handoff.
+ * Every score is presented as a raw similarity value next to its matching
+ * method, never as "confidence" or a percentage. `no_match`, cue-level
+ * `failure`, and Analysis-level `failed` are rendered as three distinct,
+ * never-conflated outcomes.
  */
 
 export interface ResultPageProps {
   analysisId: string;
+  analysis: AnalysisPublic | null;
+  pollingError: ErrorPublic | null;
+  connectionLost: boolean;
+  isPolling: boolean;
+  /** Current-session uploaded cue filenames by `cue_id`, used as the
+   * presentation-identity fallback when a cue has no S0003 `label`. Never
+   * persisted as backend metadata. */
+  cueFilenamesById: Record<string, string>;
 }
 
 type ResultFetchState =
@@ -52,12 +46,19 @@ type ResultFetchState =
   | { status: "api_error"; error: ErrorPublic }
   | { status: "network_error" };
 
-function ScoreLabel({ occurrence }: { occurrence: Occurrence }): JSX.Element {
-  return (
-    <span>
-      Similarity score ({occurrence.matching_method}): {occurrence.score}
-    </span>
-  );
+function cueIdentity(
+  cueId: string,
+  cueFilenamesById: Record<string, string>,
+  label?: string | null,
+): { primary: string; secondary: string | null } {
+  const filename = cueFilenamesById[cueId];
+  if (label) {
+    return { primary: label, secondary: filename ?? null };
+  }
+  if (filename) {
+    return { primary: filename, secondary: null };
+  }
+  return { primary: cueId, secondary: null };
 }
 
 function OccurrenceItem({
@@ -66,22 +67,57 @@ function OccurrenceItem({
   occurrence: Occurrence;
 }): JSX.Element {
   return (
-    <li>
-      <div>Position: {occurrence.temporal_position}s</div>
-      <div>
-        <ScoreLabel occurrence={occurrence} />
-      </div>
-      {occurrence.end !== null ? <div>End: {occurrence.end}s</div> : null}
+    <li className="occurrence-item">
+      <span>Position: {occurrence.temporal_position}s</span>
+      {occurrence.end !== null && <span>End: {occurrence.end}s</span>}
+      <span
+        className="occurrence-score-badge"
+        title={`Raw similarity score: ${occurrence.score}`}
+      >
+        Similarity score: {occurrence.score}
+      </span>
+      <span>Method: {occurrence.matching_method}</span>
     </li>
   );
 }
 
-function CueOutcomeItem({ cue }: { cue: CueResult }): JSX.Element {
+function CueOutcomeItem({
+  cue,
+  index,
+  cueFilenamesById,
+  cueLabelsById,
+}: {
+  cue: CueResult;
+  index: number;
+  cueFilenamesById: Record<string, string>;
+  cueLabelsById: Record<string, string | null | undefined>;
+}): JSX.Element {
+  const identity = cueIdentity(
+    cue.cue_id,
+    cueFilenamesById,
+    cueLabelsById[cue.cue_id],
+  );
+
+  const heading = (
+    <div className="result-cue-heading">
+      <span
+        className={`result-note${index % 2 === 1 ? " result-note--alt" : ""}`}
+        aria-hidden="true"
+      >
+        ♫
+      </span>
+      <div>
+        <h3>{identity.primary}</h3>
+        {identity.secondary && <small>{identity.secondary}</small>}
+      </div>
+    </div>
+  );
+
   if (cue.outcome.kind === "occurrences") {
     return (
-      <li>
-        <h3>Cue: {cue.cue_id}</h3>
-        <ul>
+      <li className="result-row">
+        {heading}
+        <ul className="occurrence-list">
           {cue.outcome.occurrences.map((occurrence, index) => (
             <OccurrenceItem
               key={`${cue.cue_id}-${index}`}
@@ -95,19 +131,18 @@ function CueOutcomeItem({ cue }: { cue: CueResult }): JSX.Element {
 
   if (cue.outcome.kind === "no_match") {
     return (
-      <li>
-        <h3>Cue: {cue.cue_id}</h3>
-        <p>No match found for this cue.</p>
+      <li className="result-row result-row--no-match">
+        {heading}
+        <p className="no-match-text">No match found for this cue.</p>
       </li>
     );
   }
 
   return (
-    <li>
-      <h3>Cue: {cue.cue_id}</h3>
-      <p role="alert">
-        Processing failed for this cue ({cue.outcome.failure.category}):{" "}
-        {cue.outcome.failure.message}
+    <li className="result-row result-row--failure">
+      {heading}
+      <p className="failure-text" role="alert">
+        {cue.outcome.failure.category}: {cue.outcome.failure.message}
       </p>
     </li>
   );
@@ -121,8 +156,8 @@ function ApiErrorNotice({
   error: ErrorPublic;
 }): JSX.Element {
   return (
-    <div role="alert">
-      <h2>{heading}</h2>
+    <div className="analysis-failed-notice" role="alert">
+      <h3>{heading}</h3>
       <p>
         {error.message} (error_code: {error.error_code}, correlation_id:{" "}
         {error.correlation_id})
@@ -131,14 +166,44 @@ function ApiErrorNotice({
   );
 }
 
+function totalOccurrenceCount(envelope: AnalysisResultEnvelope): number {
+  return envelope.result.cues.reduce((total, cue) => {
+    if (cue.outcome.kind === "occurrences") {
+      return total + cue.outcome.occurrences.length;
+    }
+    return total;
+  }, 0);
+}
+
+function matchCountLabel(count: number): string {
+  if (count === 1) {
+    return "1 match found";
+  }
+  return `${count} matches found`;
+}
+
 export default function ResultPage({
   analysisId,
+  analysis,
+  pollingError,
+  connectionLost,
+  isPolling,
+  cueFilenamesById,
 }: ResultPageProps): JSX.Element {
-  const { analysis, error, connectionLost, isPolling } =
-    useAnalysisPolling(analysisId);
   const [resultState, setResultState] = useState<ResultFetchState>({
     status: "not_requested",
   });
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    headingRef.current?.focus();
+    // Runs once, when this card is first mounted for a newly created
+    // Analysis (S0004 section 4.10): move scroll/focus context toward
+    // Results without stealing focus on later re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!analysis || analysis.status !== "succeeded") {
@@ -180,73 +245,138 @@ export default function ResultPage({
     };
   }, [analysis?.status, analysis?.analysis_id]);
 
-  if (connectionLost) {
-    return <p role="alert">Unable to reach the server to check this Analysis's status.</p>;
+  const cueLabelsById: Record<string, string | null | undefined> = {};
+  for (const cue of analysis?.cues ?? []) {
+    cueLabelsById[cue.cue_id] = cue.label;
   }
 
-  if (error) {
-    return <ApiErrorNotice heading="Unable to load Analysis status" error={error} />;
-  }
+  function renderBody(): JSX.Element {
+    if (connectionLost) {
+      return (
+        <p role="alert" className="form-alert">
+          Unable to reach the server to check this Analysis's status. The
+          Analysis may still be in progress on the server.
+        </p>
+      );
+    }
 
-  if (!analysis || isPolling) {
-    return <p>Waiting for this Analysis to reach a terminal state...</p>;
-  }
+    if (pollingError) {
+      return (
+        <ApiErrorNotice
+          heading="Unable to load Analysis status"
+          error={pollingError}
+        />
+      );
+    }
 
-  if (analysis.status === "failed") {
+    if (!analysis || isPolling) {
+      return <p className="results-loading">Analyzing…</p>;
+    }
+
+    if (analysis.status === "failed") {
+      return (
+        <div className="analysis-failed-notice" role="alert">
+          <h3>Analysis failed</h3>
+          {analysis.structured_error ? (
+            <p>
+              {analysis.structured_error.category}:{" "}
+              {analysis.structured_error.message}
+            </p>
+          ) : null}
+        </div>
+      );
+    }
+
+    // analysis.status === "succeeded" from here on.
+    if (resultState.status === "not_requested" || resultState.status === "loading") {
+      return <p className="results-loading">Loading Analysis result…</p>;
+    }
+
+    if (resultState.status === "network_error") {
+      return (
+        <p role="alert" className="form-alert">
+          Unable to reach the server to load this Analysis result.
+        </p>
+      );
+    }
+
+    if (resultState.status === "api_error") {
+      return (
+        <ApiErrorNotice
+          heading="Unable to load Analysis result"
+          error={resultState.error}
+        />
+      );
+    }
+
+    const { envelope, rawText } = resultState;
+    const matchCount = totalOccurrenceCount(envelope);
+
     return (
-      <div role="alert">
-        <h2>Analysis failed</h2>
-        {analysis.structured_error ? (
-          <p>
-            {analysis.structured_error.category}:{" "}
-            {analysis.structured_error.message}
-          </p>
-        ) : null}
-      </div>
+      <>
+        <div className="match-badge">
+          <span aria-hidden="true">✓</span>
+          <strong>{matchCountLabel(matchCount)}</strong>
+        </div>
+        <ul className="results-list">
+          {envelope.result.cues.map((cue, index) => (
+            <CueOutcomeItem
+              key={cue.cue_id}
+              cue={cue}
+              index={index}
+              cueFilenamesById={cueFilenamesById}
+              cueLabelsById={cueLabelsById}
+            />
+          ))}
+        </ul>
+        <button
+          type="button"
+          className="download-button"
+          onClick={() =>
+            downloadAnalysisResultText(analysis.analysis_id, rawText)
+          }
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4h14v-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          Download result JSON
+        </button>
+      </>
     );
   }
-
-  // analysis.status === "succeeded" from here on.
-  if (resultState.status === "not_requested" || resultState.status === "loading") {
-    return <p>Loading Analysis result...</p>;
-  }
-
-  if (resultState.status === "network_error") {
-    return (
-      <p role="alert">
-        Unable to reach the server to load this Analysis result.
-      </p>
-    );
-  }
-
-  if (resultState.status === "api_error") {
-    return (
-      <ApiErrorNotice
-        heading="Unable to load Analysis result"
-        error={resultState.error}
-      />
-    );
-  }
-
-  const { envelope, rawText } = resultState;
 
   return (
-    <section>
-      <h2>Analysis result</h2>
-      <p>Method: {envelope.result.method}</p>
-      <ul>
-        {envelope.result.cues.map((cue) => (
-          <CueOutcomeItem key={cue.cue_id} cue={cue} />
-        ))}
-      </ul>
-      <button
-        type="button"
-        onClick={() =>
-          downloadAnalysisResultText(analysis.analysis_id, rawText)
-        }
-      >
-        Download result JSON
-      </button>
+    <section
+      ref={sectionRef}
+      className="panel results-panel"
+      aria-labelledby="results-title"
+    >
+      <div className="panel-heading results-heading">
+        <div className="heading-group">
+          <span className="heading-icon heading-icon--pink" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <rect x="4" y="12" width="3.5" height="8" rx="1.5" fill="currentColor" />
+              <rect x="10.2" y="7" width="3.5" height="13" rx="1.5" fill="currentColor" />
+              <rect x="16.5" y="3" width="3.5" height="17" rx="1.5" fill="currentColor" />
+            </svg>
+          </span>
+          <div>
+            <h2 id="results-title" ref={headingRef} tabIndex={-1}>
+              Results
+            </h2>
+            <p>Found matches for your audio cues.</p>
+          </div>
+        </div>
+      </div>
+
+      {renderBody()}
     </section>
   );
 }

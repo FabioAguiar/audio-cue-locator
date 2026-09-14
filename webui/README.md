@@ -8,17 +8,26 @@ boundary (`docs/architecture.md`, "WebUI").
 The framework decision and its rationale are recorded in
 `docs/webui-stack-decision.md`.
 
-## What this is (M6-01 scope)
+## What this is
 
-This issue establishes only the framework decision and the initial
-application scaffold. It does not implement:
+This is the standalone Home screen for Audio Cue Locator: a single
+responsive workflow (`webui/src/main.tsx` + `webui/src/pages/
+NewAnalysisPage.tsx` + `webui/src/pages/ResultPage.tsx`) rather than a
+placeholder scaffold. From `/`, a user can:
 
-- media/cue submission or Analysis lifecycle polling (M6-02);
-- result presentation, occurrences, scores, or JSON download (M6-03);
-- temporal/timeline visualization (M6-04).
+- select a supported source-media file (by click or drag/drop);
+- add one or more WAV cues, each with optional Name/Start time/End time
+  (S0003 `label`/`trim_start_seconds`/`trim_end_seconds`);
+- create an Analysis and watch its lifecycle (`Creating…` / `Analyzing…`)
+  without a separate status panel;
+- review Results -- occurrences, `no_match`, cue-level failures, and
+  Analysis-level failures -- as soon as they are available, and download
+  the byte-identical Result JSON.
 
-The scaffold currently renders a minimal placeholder view with no upload or
-Analysis logic.
+Temporal/timeline visualization remains out of scope (M6-04's postponement
+still applies; see `docs/vision.md`), and no media preview/play control is
+implemented (S0004, `specs/S0004-responsive-single-screen-home-design-
+convergence/spec.md`).
 
 ## Stack
 
@@ -53,9 +62,9 @@ must go through the `/api/v1` namespace, for example:
 - `GET /api/v1/analyses/{analysis_id}`
 - `GET /api/v1/analyses/{analysis_id}/result`
 
-The intended API base URL is configured as a single constant in
-`webui/src/main.tsx` (`API_BASE_URL`). No request is made against it yet;
-M6-02 introduces the first actual API call.
+The API base URL is a single constant (`API_BASE_URL`) in
+`webui/src/api/client.ts`, the only module that constructs a `fetch`
+request or knows the request/response JSON shapes.
 
 This WebUI must never:
 

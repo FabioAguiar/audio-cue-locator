@@ -63,8 +63,10 @@ raw API payloads, raw logs, runtime database contents, or host-specific paths.
 
 The browser selects one source and two independently matching cues, submits the
 form, obtains the server-issued Analysis ID, and waits while the WebUI polls the
-real status endpoint until `succeeded`. It then uses **View results** and checks
-that both `cue-1` and `cue-2` have occurrence results.
+real status endpoint until `succeeded`. Results appear automatically on the same
+Home screen (S0004, `specs/S0004-responsive-single-screen-home-design-
+convergence/spec.md`; no `View results` step or separate status card). The test
+checks that both `cue-1` and `cue-2` have occurrence results.
 
 The test captures the successful Result response bytes in memory, activates
 **Download result JSON**, and asserts that the downloaded filename contains the
