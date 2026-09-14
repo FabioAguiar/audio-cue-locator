@@ -85,6 +85,8 @@ from audio_cue_locator.application.asset_ingestion import (
 )
 from audio_cue_locator.application.create_analysis import (
     DEFAULT_MAX_CUE_COUNT,
+    DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS,
+    DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
     CreateAnalysisUseCase,
 )
 from audio_cue_locator.application.query_analysis import QueryAnalysisUseCase
@@ -95,8 +97,13 @@ from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage imp
     LocalFilesystemAssetStorage,
 )
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
+    DEFAULT_MAX_CONCURRENCY,
     InMemoryResultReferenceStore,
     LocalAnalysisExecutor,
+)
+from audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter import (
+    DEFAULT_TIMEOUT_SECONDS,
+    FFmpegMediaAdapter,
 )
 from audio_cue_locator.interfaces.rest_api.analysis_routes import build_analysis_router
 from audio_cue_locator.interfaces.rest_api.asset_routes import build_asset_router
@@ -140,7 +147,10 @@ entries -- including `"payload_too_large"` and `"unsupported_media_type"`,
 added by M5-02 -- are bound to the centralized handlers `errors.
 install_error_handlers` registers below, so the status vocabulary stays
 coherent across the whole namespace instead of each endpoint issue picking
-its own names for the same HTTP status."""
+its own names for the same HTTP status. M7-02 deliberately does not add a
+new entry here: see `docs/supported-media-and-limits.md` for why an
+FFmpeg timeout stays mapped to the existing `"unsupported_media_type"`
+entry instead of a new status."""
 
 _ASSET_STORAGE_ROOT_ENV = "AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT"
 _DEFAULT_ASSET_STORAGE_ROOT = Path("var") / "asset_storage"
@@ -149,6 +159,12 @@ _MAX_CUE_UPLOAD_BYTES_ENV = "AUDIO_CUE_LOCATOR_MAX_CUE_UPLOAD_BYTES"
 _ANALYSIS_DB_PATH_ENV = "AUDIO_CUE_LOCATOR_ANALYSIS_DB_PATH"
 _DEFAULT_ANALYSIS_DB_PATH = Path("var") / "analysis_repository.sqlite3"
 _MAX_CUE_COUNT_ENV = "AUDIO_CUE_LOCATOR_MAX_CUE_COUNT"
+_FFMPEG_TIMEOUT_SECONDS_ENV = "AUDIO_CUE_LOCATOR_FFMPEG_TIMEOUT_SECONDS"
+_MAX_CONCURRENCY_ENV = "AUDIO_CUE_LOCATOR_MAX_CONCURRENCY"
+_MAX_SOURCE_MEDIA_DURATION_SECONDS_ENV = (
+    "AUDIO_CUE_LOCATOR_MAX_SOURCE_MEDIA_DURATION_SECONDS"
+)
+_MAX_CUE_MEDIA_DURATION_SECONDS_ENV = "AUDIO_CUE_LOCATOR_MAX_CUE_MEDIA_DURATION_SECONDS"
 
 
 def _asset_storage_root() -> Path:
@@ -280,6 +296,49 @@ def _max_cue_count() -> int:
     return int(configured) if configured else DEFAULT_MAX_CUE_COUNT
 
 
+def _ffmpeg_timeout_seconds() -> float:
+    """Explicit, environment-overridable FFmpeg/ffprobe subprocess timeout,
+    layered over `ffmpeg_adapter.DEFAULT_TIMEOUT_SECONDS` (M7-02 gap G1:
+    this value previously had no configuration surface even though
+    `FFmpegMediaAdapter.__init__` already accepted it)."""
+
+    configured = os.environ.get(_FFMPEG_TIMEOUT_SECONDS_ENV)
+    return float(configured) if configured else DEFAULT_TIMEOUT_SECONDS
+
+
+def _max_concurrency() -> int:
+    """Explicit, environment-overridable executor concurrency bound,
+    layered over `local_analysis_executor.DEFAULT_MAX_CONCURRENCY` (M7-02
+    gap G1: this value previously had no configuration surface even though
+    `LocalAnalysisExecutor.__init__` already accepted it)."""
+
+    configured = os.environ.get(_MAX_CONCURRENCY_ENV)
+    return int(configured) if configured else DEFAULT_MAX_CONCURRENCY
+
+
+def _max_source_media_duration_seconds() -> float:
+    """Explicit, environment-overridable maximum probed duration for a
+    source-media Asset, layered over `create_analysis.
+    DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS` (M7-02 gap G2: no media-
+    duration limit existed anywhere in the source tree before this
+    issue)."""
+
+    configured = os.environ.get(_MAX_SOURCE_MEDIA_DURATION_SECONDS_ENV)
+    return float(configured) if configured else DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS
+
+
+def _max_cue_media_duration_seconds() -> float:
+    """Explicit, environment-overridable maximum probed duration for a cue
+    Asset, layered over `create_analysis.
+    DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS` (M7-02 gap G2), kept
+    independently configurable from the source-media duration limit since a
+    cue is a short reference snippet, not the long recording being
+    searched."""
+
+    configured = os.environ.get(_MAX_CUE_MEDIA_DURATION_SECONDS_ENV)
+    return float(configured) if configured else DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS
+
+
 def _build_create_analysis_use_case(
     storage: LocalFilesystemAssetStorage,
 ) -> CreateAnalysisUseCase:
@@ -309,12 +368,18 @@ def _build_analysis_use_cases(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     repository = _ThreadLocalAnalysisRepository(db_path)
     result_store = InMemoryResultReferenceStore()
-    executor = LocalAnalysisExecutor(repository, result_store=result_store)
+    executor = LocalAnalysisExecutor(
+        repository, result_store=result_store, max_concurrency=_max_concurrency()
+    )
+    media_adapter = FFmpegMediaAdapter(timeout_seconds=_ffmpeg_timeout_seconds())
     create_use_case = CreateAnalysisUseCase(
         repository=repository,
         asset_storage=storage,
         executor=executor,
         max_cue_count=_max_cue_count(),
+        media_adapter=media_adapter,
+        max_source_media_duration_seconds=_max_source_media_duration_seconds(),
+        max_cue_media_duration_seconds=_max_cue_media_duration_seconds(),
     )
     query_use_case = QueryAnalysisUseCase(repository, result_store)
     return create_use_case, query_use_case

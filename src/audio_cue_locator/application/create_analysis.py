@@ -82,11 +82,20 @@ LocalAnalysisExecutor`, `infrastructure.media_processing`, and
 `interfaces.rest_api.errors` (`interfaces/rest_api/__init__.py` eagerly
 imports `app.py`, which must import this module to build its composition
 root -- a genuine circular import); `TooManyCuesError`,
-`AssetContentIncompatibleError`, and `AssetCanonicalizationError` below are
-this module's own Application-owned vocabulary for the three failure
+`AssetContentIncompatibleError`, `AssetCanonicalizationError`,
+`MediaDurationExceededError`, and `AssetProcessingTimeoutError` below are
+this module's own Application-owned vocabulary for the five failure
 classes only this module raises, translated to `interfaces.rest_api.
 errors.ResourceLimitExceededError`/`UnsupportedMediaError` by
-`interfaces.rest_api.analysis_routes`. `core.asset.AssetNotFoundError`,
+`interfaces.rest_api.analysis_routes` (M7-02 adds the latter two:
+`MediaDurationExceededError` alongside `TooManyCuesError`, both mapped to
+`ResourceLimitExceededError` as declared-limit violations, and
+`AssetProcessingTimeoutError` alongside `AssetCanonicalizationError`, both
+mapped to `UnsupportedMediaError` -- a deliberate, documented conflation
+rather than a new `ErrorCode`, since `tests/test_api_v1_contracts.py`
+outside this issue's authorized edit scope asserts that enum by exact
+equality; see `docs/supported-media-and-limits.md`).
+`core.asset.AssetNotFoundError`,
 `core.asset.InvalidAssetIdentifierError`, and `application.ports.
 analysis_repository.InvalidAnalysisRecordError`/`AnalysisAlreadyExistsError`
 already exist, are already mapped by `interfaces.rest_api.errors`, and are
@@ -135,6 +144,7 @@ from audio_cue_locator.infrastructure.media_processing.canonical_audio import (
     CANONICAL_AUDIO_SPEC,
 )
 from audio_cue_locator.infrastructure.media_processing.errors import (
+    FFmpegTimeoutError,
     MediaProcessingError,
 )
 from audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter import (
@@ -151,6 +161,33 @@ comfortably above typical multi-cue usage while still bounding the
 worst-case per-Analysis matching cost. Overridable by
 `interfaces.rest_api.app`'s composition-root wiring, exactly like M5-03's
 upload limits."""
+
+DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS = 3600.0
+"""Explicit, configurable maximum probed duration (M7-02 gap G2: no
+media-duration limit existed anywhere in the source tree before this
+issue) for a `source_asset_id` Asset. No representative measurement of
+real project usage exists yet (this issue's own test-execution phase is
+separately authorized and not performed here); this starting point is
+derived from the already-accepted 500 MiB upload-size limit
+(`asset_ingestion.DEFAULT_MAX_SOURCE_MEDIA_UPLOAD_SIZE_BYTES`), which
+already implies an approximate ~49.5-minute ceiling for uncompressed
+16-bit/44.1kHz/stereo PCM WAV (500 MiB / 176,400 bytes-per-second), rounded
+up to a communicable 60 minutes. A highly-compressed MP4 source is *not*
+already bounded this way by the size limit alone, which is this guardrail's
+primary justification (`states/M7/M7-02/issue-operational-state.json`
+gap G2). Overridable by `interfaces.rest_api.app`'s composition-root
+wiring, exactly like the existing upload/cue-count limits; must be revised
+from representative local measurement once a future, separately authorized
+test-execution phase runs `tests/operational/test_guardrails.py`."""
+
+DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS = 600.0
+"""Explicit, configurable maximum probed duration for a cue Asset,
+independently smaller than `DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS`
+because a cue is this project's own short reference snippet searched for
+inside the longer source recording (`docs/vision.md`), not itself expected
+to be a long recording. Same evidence caveat as
+`DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS`: a reasoned starting point, not
+yet backed by representative measurement."""
 
 _EFFECTIVE_CONFIGURATION_SOURCE_NAME = (
     "acoustic_matching.acceptance.EVIDENCE_BASED_CONFIGURATION"
@@ -185,6 +222,30 @@ class AssetCanonicalizationError(ValueError):
     `interfaces.rest_api.analysis_routes`, exactly like
     `AssetContentIncompatibleError`: both mean this issue's Analysis cannot
     be created from the supplied media."""
+
+
+class MediaDurationExceededError(ValueError):
+    """Raised when a referenced Asset's probed duration exceeds the
+    configured `max_source_media_duration_seconds`/
+    `max_cue_media_duration_seconds` limit (M7-02 acceptance criterion 1).
+    Translated to `interfaces.rest_api.errors.ResourceLimitExceededError`
+    by `interfaces.rest_api.analysis_routes`, exactly like
+    `TooManyCuesError`: both mean a declared quantity/size/duration limit
+    was exceeded, not that the media itself is invalid or unsupported."""
+
+
+class AssetProcessingTimeoutError(RuntimeError):
+    """Raised when probing or decoding a referenced Asset's media exceeds
+    the configured FFmpeg subprocess timeout (M7-02 gap G3), kept distinct
+    from `AssetCanonicalizationError` at this Application boundary so the
+    two failure causes are never confused in this module's own code and
+    exception handling. Translated to `interfaces.rest_api.errors.
+    UnsupportedMediaError` by `interfaces.rest_api.analysis_routes`,
+    exactly like `AssetCanonicalizationError`: `tests/
+    test_api_v1_contracts.py` (outside this issue's authorized edit scope)
+    asserts the external `ErrorCode` enum by exact equality, so this issue
+    deliberately keeps the client-visible contract unchanged rather than
+    adding a new code (`docs/supported-media-and-limits.md`)."""
 
 
 @dataclass(frozen=True)
@@ -272,12 +333,37 @@ def _resample(samples: np.ndarray, source_rate: int, target_rate: int) -> np.nda
     return resampled.astype(np.float32)
 
 
-def _wav_bytes_to_canonical_array(wav_bytes: bytes) -> np.ndarray:
+def _enforce_duration_limit(
+    duration_seconds: float | None, max_duration_seconds: float
+) -> None:
+    """Reject media whose probed `duration_seconds` exceeds
+    `max_duration_seconds` (M7-02 acceptance criterion 1). A `None`
+    duration (never observed for a WAV parsed by `wave`, but possible for
+    an MP4 `ProbeResult` if ffprobe reports no duration) is not enforced:
+    this guardrail bounds a *known* excessive duration, it does not reject
+    media whose duration could not be determined."""
+
+    if duration_seconds is not None and duration_seconds > max_duration_seconds:
+        raise MediaDurationExceededError(
+            f"media duration {duration_seconds:.3f}s exceeds the configured "
+            f"maximum of {max_duration_seconds:.3f}s"
+        )
+
+
+def _wav_bytes_to_canonical_array(
+    wav_bytes: bytes,
+    *,
+    max_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
+) -> np.ndarray:
     """Decode WAV PCM bytes into a `CANONICAL_AUDIO_SPEC`-conformant
     (mono, float32, `CANONICAL_AUDIO_SPEC.sample_rate_hz`, peak-normalized)
     NumPy array, using only the standard-library `wave` module -- no
     FFmpeg invocation is needed for a WAV input, since `wave` already
-    parses the PCM container directly."""
+    parses the PCM container directly. `wave`'s own header parse already
+    constitutes real structural probing beyond an extension/declared-type
+    check (M7-02 gap G5: this is accepted as sufficient WAV probing rather
+    than adding a second, ffprobe-based check; see
+    docs/supported-media-and-limits.md)."""
 
     try:
         with io.BytesIO(wav_bytes) as buffer, wave.open(buffer, "rb") as reader:
@@ -295,6 +381,9 @@ def _wav_bytes_to_canonical_array(wav_bytes: bytes) -> np.ndarray:
         # content cannot be canonicalized, regardless of the specific
         # internal exception type `wave` happens to raise for it.
         raise AssetCanonicalizationError(f"malformed WAV content: {exc}") from exc
+
+    duration_seconds = (frame_count / frame_rate) if frame_rate else None
+    _enforce_duration_limit(duration_seconds, max_duration_seconds)
 
     samples = _pcm_bytes_to_float32(raw, sample_width)
     if channels > 1:
@@ -316,22 +405,46 @@ def _wav_bytes_to_canonical_array(wav_bytes: bytes) -> np.ndarray:
     return samples.astype(np.float32)
 
 
-def _mp4_bytes_to_canonical_array(mp4_bytes: bytes, adapter: FFmpegMediaAdapter) -> np.ndarray:
+def _mp4_bytes_to_canonical_array(
+    mp4_bytes: bytes,
+    adapter: FFmpegMediaAdapter,
+    *,
+    max_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
+) -> np.ndarray:
     """Decode an MP4 container's audio stream to WAV via the confirmed-
     existing `FFmpegMediaAdapter.extract_audio` (this project's sole
     permitted ffmpeg/ffprobe invocation point), then canonicalize the
-    resulting WAV bytes exactly like a native WAV upload."""
+    resulting WAV bytes exactly like a native WAV upload.
+
+    Probes the file first so an over-duration source is rejected before
+    the (potentially slower) decode step runs, and so an FFmpeg/ffprobe
+    subprocess timeout is raised as `AssetProcessingTimeoutError` --
+    distinguishable from a genuinely malformed file -- at both the probe
+    and the decode call (M7-02 gap G3)."""
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_path = Path(tmp_dir) / "input.mp4"
         output_path = Path(tmp_dir) / "output.wav"
         input_path.write_bytes(mp4_bytes)
         try:
+            probe_result = adapter.probe(str(input_path))
+        except FFmpegTimeoutError as exc:
+            raise AssetProcessingTimeoutError(
+                f"timed out while probing MP4 media: {exc}"
+            ) from exc
+        except MediaProcessingError as exc:
+            raise AssetCanonicalizationError(f"could not probe MP4 media: {exc}") from exc
+        _enforce_duration_limit(probe_result.duration_seconds, max_duration_seconds)
+        try:
             adapter.extract_audio(str(input_path), str(output_path))
+        except FFmpegTimeoutError as exc:
+            raise AssetProcessingTimeoutError(
+                f"timed out while decoding MP4 audio: {exc}"
+            ) from exc
         except MediaProcessingError as exc:
             raise AssetCanonicalizationError(f"could not decode MP4 audio: {exc}") from exc
         wav_bytes = output_path.read_bytes()
-    return _wav_bytes_to_canonical_array(wav_bytes)
+    return _wav_bytes_to_canonical_array(wav_bytes, max_duration_seconds=max_duration_seconds)
 
 
 class CreateAnalysisUseCase:
@@ -348,20 +461,36 @@ class CreateAnalysisUseCase:
         executor: LocalAnalysisExecutor,
         max_cue_count: int = DEFAULT_MAX_CUE_COUNT,
         media_adapter: FFmpegMediaAdapter | None = None,
+        max_source_media_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
+        max_cue_media_duration_seconds: float = DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS,
         clock: ClockFn = _default_clock,
     ) -> None:
         if max_cue_count < 1:
             raise ValueError("max_cue_count must be a positive integer")
+        if max_source_media_duration_seconds <= 0:
+            raise ValueError("max_source_media_duration_seconds must be positive")
+        if max_cue_media_duration_seconds <= 0:
+            raise ValueError("max_cue_media_duration_seconds must be positive")
         self._repository = repository
         self._asset_storage = asset_storage
         self._executor = executor
         self._max_cue_count = max_cue_count
         self._media_adapter = media_adapter or FFmpegMediaAdapter()
+        self._max_source_media_duration_seconds = max_source_media_duration_seconds
+        self._max_cue_media_duration_seconds = max_cue_media_duration_seconds
         self._clock = clock
 
     @property
     def max_cue_count(self) -> int:
         return self._max_cue_count
+
+    @property
+    def max_source_media_duration_seconds(self) -> float:
+        return self._max_source_media_duration_seconds
+
+    @property
+    def max_cue_media_duration_seconds(self) -> float:
+        return self._max_cue_media_duration_seconds
 
     def create(
         self, *, source_asset_id: str, cues: Sequence[CueRequest]
@@ -390,6 +519,7 @@ class CreateAnalysisUseCase:
             source_asset_id,
             allowed_media_types=SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES,
             role="source_asset_id",
+            max_duration_seconds=self._max_source_media_duration_seconds,
         )
 
         cue_references: list[CueAssetReference] = []
@@ -399,6 +529,7 @@ class CreateAnalysisUseCase:
                 cue.asset_id,
                 allowed_media_types=CUE_SUPPORTED_MEDIA_TYPES,
                 role=f"cues[{cue.cue_id!r}].asset_id",
+                max_duration_seconds=self._max_cue_media_duration_seconds,
             )
             cue_references.append(
                 CueAssetReference(cue_id=cue.cue_id, asset_id=cue.asset_id)
@@ -422,13 +553,19 @@ class CreateAnalysisUseCase:
         return record
 
     def _resolve_and_canonicalize(
-        self, asset_id: str, *, allowed_media_types: frozenset[str], role: str
+        self,
+        asset_id: str,
+        *,
+        allowed_media_types: frozenset[str],
+        role: str,
+        max_duration_seconds: float,
     ) -> np.ndarray:
         """Read `asset_id` (raising `AssetNotFoundError`/
         `InvalidAssetIdentifierError` unchanged if it does not exist or is
         malformed -- both already mapped by `interfaces.rest_api.errors`),
         confirm its detected content matches `allowed_media_types` for
-        `role`, and return its `CANONICAL_AUDIO_SPEC`-conformant array."""
+        `role`, enforce `max_duration_seconds` (M7-02 acceptance criterion
+        1), and return its `CANONICAL_AUDIO_SPEC`-conformant array."""
 
         content = self._asset_storage.read(asset_id)
         detected_media_type = sniff_media_type(content)
@@ -439,5 +576,7 @@ class CreateAnalysisUseCase:
                 f"of {sorted(allowed_media_types)!r})"
             )
         if detected_media_type == "video/mp4":
-            return _mp4_bytes_to_canonical_array(content, self._media_adapter)
-        return _wav_bytes_to_canonical_array(content)
+            return _mp4_bytes_to_canonical_array(
+                content, self._media_adapter, max_duration_seconds=max_duration_seconds
+            )
+        return _wav_bytes_to_canonical_array(content, max_duration_seconds=max_duration_seconds)

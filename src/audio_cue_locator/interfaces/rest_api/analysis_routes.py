@@ -22,11 +22,18 @@ it).
 
 `_create_analysis` below is this issue's one narrow translation point
 between Application's own `TooManyCuesError`/`AssetContentIncompatibleError`/
-`AssetCanonicalizationError` (`application.create_analysis` cannot itself
+`AssetCanonicalizationError`/`MediaDurationExceededError`/
+`AssetProcessingTimeoutError` (`application.create_analysis` cannot itself
 import anything under `interfaces.rest_api` -- see that module's docstring
 for the circular import this would otherwise create) and `errors.py`'s
 REST-boundary `ResourceLimitExceededError`/`UnsupportedMediaError`, which
-`errors.install_error_handlers` already maps to the safe 413/415 responses.
+`errors.install_error_handlers` already maps to the safe 413/415
+responses. M7-02 adds `MediaDurationExceededError` alongside
+`TooManyCuesError` (both a declared-limit violation, 413) and
+`AssetProcessingTimeoutError` alongside `AssetContentIncompatibleError`/
+`AssetCanonicalizationError` (all three map to the existing 415
+`UnsupportedMediaError`, a deliberate, documented conflation rather than a
+new `ErrorCode`/status -- see `docs/supported-media-and-limits.md`).
 `core.asset.AssetNotFoundError`/`InvalidAssetIdentifierError` and
 `application.ports.analysis_repository.InvalidAnalysisRecordError`/
 `AnalysisAlreadyExistsError` are already mapped by `errors.py` and are left
@@ -40,8 +47,10 @@ from fastapi import APIRouter, Response, status
 from audio_cue_locator.application.create_analysis import (
     AssetCanonicalizationError,
     AssetContentIncompatibleError,
+    AssetProcessingTimeoutError,
     CreateAnalysisUseCase,
     CueRequest,
+    MediaDurationExceededError,
     TooManyCuesError,
 )
 from audio_cue_locator.application.query_analysis import QueryAnalysisUseCase
@@ -137,9 +146,13 @@ def _create_analysis(
     ]
     try:
         record = use_case.create(source_asset_id=payload.source_asset_id, cues=cue_requests)
-    except TooManyCuesError as exc:
+    except (TooManyCuesError, MediaDurationExceededError) as exc:
         raise ResourceLimitExceededError(str(exc)) from exc
-    except (AssetContentIncompatibleError, AssetCanonicalizationError) as exc:
+    except (
+        AssetContentIncompatibleError,
+        AssetCanonicalizationError,
+        AssetProcessingTimeoutError,
+    ) as exc:
         raise UnsupportedMediaError(str(exc)) from exc
 
     public = analysis_record_to_public(record)

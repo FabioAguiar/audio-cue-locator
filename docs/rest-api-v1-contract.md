@@ -164,7 +164,7 @@ reinvent:
 | `accepted` | 202 | Asynchronous Analysis creation (`docs/architecture.md`, "Fluxo programatico": "202 Accepted + Analysis ID"); bound by M5-04's `POST /api/v1/analyses`. |
 | `no_content` | 204 | A future successful request with no response body. |
 | `bad_request` | 400 | Domain-level invalid input caught by Core/Application (`InvalidAssetIdentifierError`, `InvalidAssetMetadataError`, `InvalidAnalysisRecordError`, `AnalysisSourceInputError`); bound by M5-02. |
-| `payload_too_large` | 413 | A size/quantity limit exceeded (`errors.ResourceLimitExceededError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.AssetUploadTooLargeError`). |
+| `payload_too_large` | 413 | A size/duration/quantity limit exceeded (`errors.ResourceLimitExceededError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.AssetUploadTooLargeError`); extended by M7-02 to also cover an over-duration source/cue Asset. |
 | `unsupported_media_type` | 415 | Submitted media fails format/codec/audio-stream validation (`errors.UnsupportedMediaError`); bound by M5-02, first raised by M5-03's upload routes (translated from `asset_ingestion.UnsupportedAssetMediaError`). |
 | `not_found` | 404 | An Asset or Analysis identifier with no matching resource (`AssetNotFoundError`, `AnalysisNotFoundError`); bound by M5-02, used by M5-05. |
 | `conflict` | 409 | A state conflict: an Analysis lifecycle transition conflict, an already-existing Analysis identifier, an Asset storage collision, or a Result requested while its Analysis is pending/FAILED; used by M5-04/M5-05. |
@@ -255,8 +255,8 @@ across every endpoint family uses this one schema
 | `error_code` | HTTP status | Mapped from |
 |---|---:|---|
 | `validation_error` | 422 (request-shape) or 400 (domain-level) | `RequestValidationError`; `InvalidAssetIdentifierError`; `InvalidAssetMetadataError`; `InvalidAnalysisRecordError`; `AnalysisSourceInputError`. |
-| `unsupported_media` | 415 | `errors.UnsupportedMediaError` (a future Application adapter translates an Infrastructure `media_processing.errors.InvalidMediaError`/`NoAudioStreamError` into this type before it reaches Interfaces). |
-| `resource_limit_exceeded` | 413 | `errors.ResourceLimitExceededError` (a declared size or quantity limit, for example an oversized upload or too many cues). |
+| `unsupported_media` | 415 | `errors.UnsupportedMediaError` (an Application adapter in `application.create_analysis` translates an Infrastructure `media_processing.errors.InvalidMediaError`/`NoAudioStreamError`/`FFmpegExecutionError` into this type before it reaches Interfaces). Also covers an FFmpeg probe/decode subprocess timeout (`media_processing.errors.FFmpegTimeoutError`, via `create_analysis.AssetProcessingTimeoutError`): M7-02 deliberately keeps this conflation rather than adding a new `ErrorCode` (see `docs/supported-media-and-limits.md`). |
+| `resource_limit_exceeded` | 413 | `errors.ResourceLimitExceededError` (a declared size, duration, or quantity limit, for example an oversized upload, an over-duration source/cue Asset (M7-02), or too many cues). |
 | `resource_not_found` | 404 | `AssetNotFoundError`; `AnalysisNotFoundError`. |
 | `lifecycle_conflict` | 409 | `InvalidLifecycleTransitionError`; `AssetStorageCollisionError`; `AnalysisAlreadyExistsError`. |
 | `result_not_ready` | 409 | `application.query_analysis.AnalysisResultNotReadyError`, raised for Result retrieval while the persisted state is `queued` or `running`. |

@@ -323,7 +323,15 @@ class ErrorCode(str, Enum):
     response carries exactly one of these codes; the set is additive-only
     -- an existing member is never renamed or repurposed. The mapping from
     a caught exception to one of these codes lives in
-    `interfaces.rest_api.errors`, not here."""
+    `interfaces.rest_api.errors`, not here.
+
+    M7-02 does not add a member here for an FFmpeg probe/decode timeout:
+    `tests/test_api_v1_contracts.py` (outside this issue's authorized edit
+    scope) asserts this enum's OpenAPI-exposed value set by exact equality,
+    so this issue distinguishes a timeout one layer earlier instead (see
+    `application.create_analysis.AssetProcessingTimeoutError`) and
+    deliberately keeps this contract's external shape unchanged; see
+    `docs/supported-media-and-limits.md` for the recorded decision."""
 
     VALIDATION_ERROR = "validation_error"
     UNSUPPORTED_MEDIA = "unsupported_media"

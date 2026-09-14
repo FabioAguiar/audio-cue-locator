@@ -2,12 +2,13 @@
 failure-translation policy (M5-02).
 
 Every `/api/v1` failure -- request validation, unsupported media, a
-size/quantity limit, a missing resource, an Analysis lifecycle conflict, a
-persisted FAILED Analysis, or an unexpected exception -- is translated
-here into the single `schemas.ErrorPublic` envelope and a safe HTTP status
-drawn from `app.V1_STATUS_CATALOG`, so every endpoint family (present and
-future) returns one consistent shape instead of each inventing its own
-(`issues/M5/M5-02/formal-issue.json`, acceptance criterion 1).
+size/duration/quantity limit, a missing resource, an Analysis lifecycle
+conflict, a persisted FAILED Analysis, or an unexpected exception -- is
+translated here into the single `schemas.ErrorPublic` envelope and a safe
+HTTP status drawn from `app.V1_STATUS_CATALOG`, so every endpoint family
+(present and future) returns one consistent shape instead of each
+inventing its own (`issues/M5/M5-02/formal-issue.json`, acceptance
+criterion 1).
 
 Per `docs/architecture.md` ("O Core nao conhece interfaces externas";
 "REST API e quaisquer interfaces futuras devem invocar operacoes da camada
@@ -25,7 +26,11 @@ endpoint issues that actually call Infrastructure (M5-03/M5-04).
 vocabulary for the failure classes those future endpoints will raise; they
 carry no Infrastructure or Core import of their own, and are defined here
 -- not in `application/` -- because this issue's authorized edit scope is
-limited to `interfaces/rest_api/`.
+limited to `interfaces/rest_api/`. M7-02's `AssetProcessingTimeoutError`
+(`application.create_analysis`) is translated to this same module's
+`UnsupportedMediaError` by `interfaces.rest_api.analysis_routes`, a
+deliberate, documented conflation (`docs/supported-media-and-limits.md`)
+that keeps this module's external `ErrorCode`/status contract unchanged.
 
 Every mapped response uses one of a small, fixed set of safe per-
 `ErrorCode` messages (`SAFE_MESSAGES`), never a raw exception message, so
@@ -88,8 +93,9 @@ class UnsupportedMediaError(ValueError):
 
 class ResourceLimitExceededError(ValueError):
     """Raised at the REST/Application boundary when a request exceeds a
-    declared size or quantity limit (for example, an oversized upload or
-    too many cues in one Analysis request)."""
+    declared size, duration, or quantity limit (for example, an oversized
+    upload, an over-duration source/cue Asset, or too many cues in one
+    Analysis request)."""
 
 
 class AnalysisResultUnavailableError(RuntimeError):
