@@ -45,6 +45,7 @@ import json
 import logging
 import shutil
 import struct
+import subprocess
 import wave
 from collections.abc import Coroutine, Iterable
 from datetime import datetime, timedelta, timezone
@@ -325,6 +326,85 @@ def test_video_source_with_audio_completes_the_real_http_analysis_flow(
                 filename="video_with_audio.mp4",
                 content_type="video/mp4",
                 expected_media_type="video/mp4",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(case["cue"]),
+                filename="cue.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            location = created.headers["location"]
+
+            terminal = await _poll_terminal(
+                client, location, attempts=600, interval_seconds=0.25
+            )
+            assert terminal["status"] == "succeeded"
+
+            result_response = await client.get(f"{location}/result")
+            assert result_response.status_code == 200, result_response.text
+            envelope = result_response.json()
+            outcome = envelope["result"]["cues"][0]["outcome"]
+            assert outcome["kind"] in {"occurrences", "no_match"}
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
+# --- S0002: WebM source through the real REST path (real FFmpeg) ----------
+
+
+@pytest.mark.skipif(_FFMPEG_UNAVAILABLE, reason=_FFMPEG_SKIP_REASON)
+def test_webm_source_with_audio_completes_the_real_http_analysis_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0002 (`specs/S0002-common-video-container-source-media-support/
+    spec.md`) acceptance criterion 9: WebM support proven through the real
+    REST path, not only a unit-level allowlist assertion. Synthesizes a
+    small WebM source at test time (no committed binary fixture, mirroring
+    `tests/test_media_processing_ffmpeg_adapter.py`'s own synthesis
+    convention) and drives it through upload, `video/webm` detection,
+    FFmpeg-backed canonicalization, Analysis creation, and terminal Result
+    retrieval -- the same real decode-to-terminal-result shape
+    `test_video_source_with_audio_completes_the_real_http_analysis_flow`
+    above already proves for MP4, now also proven for the container family
+    a real user's rejected upload (this spec's own `source_context`)
+    motivated."""
+
+    case = _manifest_case("found_offset_near_start")
+    root, app, executors = _build_test_app(monkeypatch, tmp_path, "webm-source")
+
+    webm_path = root / "tone.webm"
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+            "-c:a", "libvorbis",
+            str(webm_path),
+        ],
+        shell=False,
+        check=True,
+        timeout=30,
+    )
+    video_bytes = webm_path.read_bytes()
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                video_bytes,
+                filename="tone.webm",
+                content_type="video/webm",
+                expected_media_type="video/webm",
             )
             cue = await _upload(
                 client,

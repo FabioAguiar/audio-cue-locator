@@ -72,6 +72,63 @@ def _garbage_bytes(total_size: int = 32) -> bytes:
     return b"not a recognized media container" + b"\x00" * total_size
 
 
+def _fake_avi_bytes(total_size: int = 32) -> bytes:
+    header = b"RIFF" + max(total_size - 8, 0).to_bytes(4, "little") + b"AVI "
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _fake_riff_unrelated_bytes(total_size: int = 32) -> bytes:
+    """A well-formed RIFF container whose form type is neither `WAVE` nor
+    `AVI ` (S0002: an arbitrary RIFF container must never be classified as
+    supported)."""
+
+    header = b"RIFF" + max(total_size - 8, 0).to_bytes(4, "little") + b"RMID"
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _fake_mov_bytes(total_size: int = 32) -> bytes:
+    header = (16).to_bytes(4, "big") + b"ftyp" + b"qt  " + b"\x00\x00\x00\x00"
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _fake_iso_bmff_unknown_brand_bytes(total_size: int = 32) -> bytes:
+    """A well-formed `ftyp` box whose major/compatible brands are not in the
+    explicit S0002 sets (S0002: `ftyp` bytes alone must never imply
+    support)."""
+
+    header = (16).to_bytes(4, "big") + b"ftyp" + b"zzzz" + b"\x00\x00\x00\x00"
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _build_ebml_bytes(doctype: str, total_size: int = 64) -> bytes:
+    doctype_bytes = doctype.encode("ascii")
+    doctype_element = bytes([0x42, 0x82, 0x80 | len(doctype_bytes)]) + doctype_bytes
+    header = b"\x1a\x45\xdf\xa3" + bytes([0x80 | len(doctype_element)]) + doctype_element
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _fake_webm_bytes(total_size: int = 64) -> bytes:
+    return _build_ebml_bytes("webm", total_size)
+
+
+def _fake_mkv_bytes(total_size: int = 64) -> bytes:
+    return _build_ebml_bytes("matroska", total_size)
+
+
+def _fake_ebml_unknown_doctype_bytes(total_size: int = 64) -> bytes:
+    return _build_ebml_bytes("ssax", total_size)
+
+
+def _fake_ebml_garbage_bytes(total_size: int = 64) -> bytes:
+    """A real EBML header ID followed by content that never resolves to a
+    recognized `DocType` element (S0002: malformed/unknown EBML must never
+    be accepted)."""
+
+    junk = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+    header = b"\x1a\x45\xdf\xa3" + bytes([0x80 | len(junk)]) + junk
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
 def _multipart_body(
     *, filename: str, content: bytes, content_type: str, boundary: str = "testboundary"
 ) -> bytes:
@@ -159,6 +216,26 @@ def test_sniff_media_type_detects_wav_and_mp4_and_rejects_unknown():
     assert sniff_media_type(b"too short") is None
 
 
+def test_sniff_media_type_detects_every_s0002_video_container_family():
+    assert sniff_media_type(_fake_avi_bytes()) == "video/x-msvideo"
+    assert sniff_media_type(_fake_mov_bytes()) == "video/quicktime"
+    assert sniff_media_type(_fake_webm_bytes()) == "video/webm"
+    assert sniff_media_type(_fake_mkv_bytes()) == "video/x-matroska"
+
+
+def test_sniff_media_type_rejects_near_signature_false_positives():
+    # An arbitrary RIFF container (neither WAVE nor AVI ) must never be
+    # accepted just because it starts with "RIFF".
+    assert sniff_media_type(_fake_riff_unrelated_bytes()) is None
+    # An arbitrary ftyp box must never be accepted merely for having bytes
+    # 4-8 equal to "ftyp"; the brand itself must be recognized.
+    assert sniff_media_type(_fake_iso_bmff_unknown_brand_bytes()) is None
+    # An EBML header with an unrecognized/ambiguous DocType must never be
+    # accepted.
+    assert sniff_media_type(_fake_ebml_unknown_doctype_bytes()) is None
+    assert sniff_media_type(_fake_ebml_garbage_bytes()) is None
+
+
 # --- AssetIngestionUseCase (Application-level, no HTTP) ---------------------
 
 
@@ -190,6 +267,47 @@ def test_ingest_accepts_mp4_for_source_media_but_rejects_it_for_cue(
             logical_type=AssetType.CUE,
             informative_name="movie.mp4",
         )
+
+
+@pytest.mark.parametrize(
+    "content_builder,expected_media_type",
+    [
+        (_fake_avi_bytes, "video/x-msvideo"),
+        (_fake_mov_bytes, "video/quicktime"),
+        (_fake_webm_bytes, "video/webm"),
+        (_fake_mkv_bytes, "video/x-matroska"),
+    ],
+)
+def test_ingest_accepts_each_new_s0002_video_type_for_source_media_but_rejects_it_for_cue(
+    use_case: AssetIngestionUseCase, content_builder, expected_media_type
+):
+    asset = use_case.ingest(
+        content=content_builder(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="clip.bin",
+    )
+    assert asset.media_type == expected_media_type
+
+    with pytest.raises(UnsupportedAssetMediaError):
+        use_case.ingest(
+            content=content_builder(),
+            logical_type=AssetType.CUE,
+            informative_name="clip.bin",
+        )
+
+
+def test_ingest_ignores_filename_extension_and_declared_media_hints(
+    use_case: AssetIngestionUseCase,
+):
+    # `informative_name` is presentation-only metadata (see module
+    # docstring); a filename claiming ".wav" must never override the real
+    # detected container.
+    asset = use_case.ingest(
+        content=_fake_webm_bytes(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="totally-not-a-lie.wav",
+    )
+    assert asset.media_type == "video/webm"
 
 
 def test_ingest_rejects_unsupported_media(use_case: AssetIngestionUseCase):
@@ -234,9 +352,16 @@ def test_two_uploads_sharing_a_client_filename_never_collide(use_case: AssetInge
     assert first.sanitized_name == second.sanitized_name == "same.wav"
 
 
-def test_default_upload_limits_source_media_allows_wav_and_mp4_cue_allows_wav_only():
+def test_default_upload_limits_source_media_allows_every_s0002_type_cue_allows_wav_only():
     limits = default_upload_limits()
-    assert limits.source_media.supported_media_types == {"audio/wav", "video/mp4"}
+    assert limits.source_media.supported_media_types == {
+        "audio/wav",
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+        "video/x-matroska",
+        "video/x-msvideo",
+    }
     assert limits.cue.supported_media_types == {"audio/wav"}
 
 
@@ -253,6 +378,24 @@ def test_upload_source_media_valid_multipart_returns_asset_public(router, storag
     assert result.logical_type.value == "source_media"
     assert result.media_type == "video/mp4"
     assert result.sanitized_name == "movie.mp4"
+    assert (storage_root / result.identifier).exists()
+
+
+def test_upload_source_media_webm_multipart_ignores_declared_content_type_and_filename(
+    router, storage_root: Path
+):
+    endpoint = _endpoint(router, "/assets/source-media")
+    # Filename and declared Content-Type both lie about the payload; the
+    # real detection must still win (S0002 acceptance: filename and
+    # request Content-Type remain non-authoritative).
+    body = _multipart_body(
+        filename="clip.mp4", content=_fake_webm_bytes(), content_type="video/mp4"
+    )
+    request = _make_request(body)
+
+    result = _run(endpoint(request))
+
+    assert result.media_type == "video/webm"
     assert (storage_root / result.identifier).exists()
 
 

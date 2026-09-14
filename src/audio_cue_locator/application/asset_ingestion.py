@@ -53,14 +53,18 @@ Resolves gaps this issue's own handoff deliberately left open
 states plainly that "a filename extension alone is not detection". This
 module never trusts a client-declared Content-Type header as that
 inspection result; `sniff_media_type` below inspects the payload's own
-leading bytes for the two container signatures
-`infrastructure/media_processing/ffmpeg_adapter.py` already documents as
-this project's confirmed, tested supported inputs ("WAV as the audio input
-format and MP4 ... as the video container"), not a new, independently
-invented allowlist. A full FFmpeg decode/stream probe remains out of this
-issue's scope -- that validation happens later, at Analysis creation
-(M5-04) and matching -- so a payload that merely carries a recognized
-container signature but fails to decode is not rejected here.
+leading bytes for a bounded, explicit set of container signatures (S0002,
+`specs/S0002-common-video-container-source-media-support/spec.md`): RIFF/
+WAVE (`audio/wav`), RIFF/AVI (`video/x-msvideo`), ISO-BMFF `ftyp` brand
+evidence distinguishing MP4/M4V (`video/mp4`) from QuickTime/MOV
+(`video/quicktime`), and EBML `DocType` evidence distinguishing WebM
+(`video/webm`) from Matroska (`video/x-matroska`) -- every one of them a
+container family `infrastructure/media_processing/ffmpeg_adapter.py`'s
+single FFmpeg-backed adapter already extracts audio from. A full FFmpeg
+decode/stream probe remains out of this issue's scope -- that validation
+happens later, at Analysis creation (M5-04) and matching -- so a payload
+that merely carries a recognized container signature but fails to decode
+is not rejected here.
 
 `interfaces/rest_api/errors.py`'s own module docstring describes translating
 a failure "into one of the REST-boundary exception types below ... [as]
@@ -102,31 +106,169 @@ class AssetUploadTooLargeError(ValueError):
     for its `logical_type`. Translated to `interfaces.rest_api.errors.
     ResourceLimitExceededError` by `interfaces.rest_api.asset_routes`."""
 
-_WAV_RIFF_MAGIC = b"RIFF"
-_WAV_FORMAT_MAGIC = b"WAVE"
+_RIFF_MAGIC = b"RIFF"
+_RIFF_WAVE_FORM_TYPE = b"WAVE"
+_RIFF_AVI_FORM_TYPE = b"AVI "
 _ISO_BMFF_BOX_TYPE = b"ftyp"
+_ISO_BMFF_MAX_COMPATIBLE_BRANDS = 32
+"""Bounds how many 4-byte compatible-brand entries the ISO-BMFF `ftyp`
+parser below will read, keeping detection deterministic and bounded
+regardless of what a payload's own declared box size claims."""
+
+_ISO_BMFF_MP4_M4V_BRANDS: frozenset[str] = frozenset(
+    {
+        "isom", "iso2", "iso3", "iso4", "iso5", "iso6",
+        "mp41", "mp42", "mp71", "avc1", "3gp4", "3gp5", "3g2a",
+        "M4V ", "M4VH", "M4VP", "M4A ", "M4B ", "dash", "isml",
+    }
+)
+"""Bounded, explicit ISO-BMFF major/compatible brands this issue (S0002)
+recognizes as MP4/M4V-family evidence. Not derived from every brand
+FFmpeg/ffprobe happens to recognize -- an unlisted brand is unsupported."""
+
+_ISO_BMFF_QUICKTIME_BRAND = "qt  "
+"""The one ISO-BMFF brand this issue treats as QuickTime/MOV evidence."""
+
+_EBML_HEADER_ID = b"\x1a\x45\xdf\xa3"
+_EBML_DOCTYPE_ELEMENT_ID = 0x4282
+_EBML_MAX_HEADER_SCAN_BYTES = 256
+"""Bounds how much of an EBML payload's declared header size the DocType
+scan below will actually walk, keeping detection deterministic and bounded
+regardless of what a payload's own declared header size claims."""
+
+
+def _ebml_read_vint(data: bytes, offset: int, *, keep_marker: bool) -> tuple[int, int] | None:
+    """Decode one EBML variable-length integer starting at ``offset``.
+
+    Returns ``(value, byte_length)``, or ``None`` if ``data`` is too short
+    or the leading byte is malformed (all-zero, no marker bit found). EBML
+    Element IDs keep their marker bit as part of the ID's own value
+    (``keep_marker=True``); EBML size fields strip it to recover the
+    encoded magnitude (``keep_marker=False``).
+    """
+
+    if offset >= len(data):
+        return None
+    first = data[offset]
+    length: int | None = None
+    for candidate in range(1, 9):
+        if first & (0x80 >> (candidate - 1)):
+            length = candidate
+            break
+    if length is None or offset + length > len(data):
+        return None
+    raw = data[offset : offset + length]
+    if keep_marker:
+        return int.from_bytes(raw, "big"), length
+    value = raw[0] & ((0x80 >> (length - 1)) - 1)
+    for byte in raw[1:]:
+        value = (value << 8) | byte
+    return value, length
+
+
+def _sniff_iso_bmff_media_type(content: bytes) -> str | None:
+    """Return ``video/mp4`` or ``video/quicktime`` from bounded ISO-BMFF
+    ``ftyp`` major/compatible-brand evidence, or ``None`` if the payload is
+    not a recognized ISO-BMFF `ftyp` box, or its brands are not in the
+    explicit sets above (S0002 acceptance: `ftyp` bytes alone never imply
+    support)."""
+
+    if len(content) < 16 or content[4:8] != _ISO_BMFF_BOX_TYPE:
+        return None
+    box_size = int.from_bytes(content[0:4], "big")
+    if box_size < 16:
+        return None
+    try:
+        major_brand = content[8:12].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+    body_end = min(len(content), box_size, 16 + 4 * _ISO_BMFF_MAX_COMPATIBLE_BRANDS)
+    compatible_brands: list[str] = []
+    offset = 16
+    while offset + 4 <= body_end:
+        try:
+            compatible_brands.append(content[offset : offset + 4].decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        offset += 4
+
+    if major_brand == _ISO_BMFF_QUICKTIME_BRAND or _ISO_BMFF_QUICKTIME_BRAND in compatible_brands:
+        return "video/quicktime"
+    if major_brand in _ISO_BMFF_MP4_M4V_BRANDS or any(
+        brand in _ISO_BMFF_MP4_M4V_BRANDS for brand in compatible_brands
+    ):
+        return "video/mp4"
+    return None
+
+
+def _sniff_ebml_media_type(content: bytes) -> str | None:
+    """Return ``video/webm`` or ``video/x-matroska`` from a bounded scan of
+    an EBML header's own ``DocType`` element, or ``None`` if the payload is
+    not a recognized EBML header, is malformed, or its `DocType` is not
+    exactly ``"webm"``/``"matroska"`` (S0002 acceptance: an unrecognized or
+    ambiguous EBML `DocType` is never accepted)."""
+
+    if len(content) < 4 or content[0:4] != _EBML_HEADER_ID:
+        return None
+    header_size_result = _ebml_read_vint(content, 4, keep_marker=False)
+    if header_size_result is None:
+        return None
+    header_size, size_length = header_size_result
+    offset = 4 + size_length
+    body_end = min(len(content), offset + min(header_size, _EBML_MAX_HEADER_SCAN_BYTES))
+
+    while offset < body_end:
+        id_result = _ebml_read_vint(content, offset, keep_marker=True)
+        if id_result is None:
+            return None
+        element_id, id_length = id_result
+        offset += id_length
+        size_result = _ebml_read_vint(content, offset, keep_marker=False)
+        if size_result is None:
+            return None
+        element_size, size_length2 = size_result
+        offset += size_length2
+        if element_id == _EBML_DOCTYPE_ELEMENT_ID:
+            try:
+                doctype = content[offset : offset + element_size].decode("ascii")
+            except UnicodeDecodeError:
+                return None
+            if doctype == "webm":
+                return "video/webm"
+            if doctype == "matroska":
+                return "video/x-matroska"
+            return None
+        offset += element_size
+    return None
 
 
 def sniff_media_type(content: bytes) -> str | None:
     """Return a normalized media type detected from ``content``'s own
     leading bytes, or ``None`` if no supported container signature matches.
 
-    Checks exactly the two signatures this project's Infrastructure media
-    adapter already documents as supported (see module docstring): a RIFF/
-    WAVE container (``audio/wav``) and an ISO base media file format
-    ``ftyp`` box (``video/mp4``, matching MP4's own container family).
-    Never consults a filename or a client-declared header.
+    Checks exactly the bounded, explicit S0002 container signatures (see
+    module docstring): RIFF/WAVE (``audio/wav``), RIFF/AVI
+    (``video/x-msvideo``), ISO-BMFF `ftyp` brand evidence
+    (``video/mp4``/``video/quicktime``), and EBML `DocType` evidence
+    (``video/webm``/``video/x-matroska``). Every check is deterministic and
+    bounded -- it never invokes FFmpeg and never reads past a small,
+    fixed-size prefix of ``content``. Never consults a filename or a
+    client-declared header.
     """
 
-    if (
-        len(content) >= 12
-        and content[0:4] == _WAV_RIFF_MAGIC
-        and content[8:12] == _WAV_FORMAT_MAGIC
-    ):
-        return "audio/wav"
-    if len(content) >= 12 and content[4:8] == _ISO_BMFF_BOX_TYPE:
-        return "video/mp4"
-    return None
+    if len(content) >= 12 and content[0:4] == _RIFF_MAGIC:
+        if content[8:12] == _RIFF_WAVE_FORM_TYPE:
+            return "audio/wav"
+        if content[8:12] == _RIFF_AVI_FORM_TYPE:
+            return "video/x-msvideo"
+        return None
+
+    iso_bmff_media_type = _sniff_iso_bmff_media_type(content)
+    if iso_bmff_media_type is not None:
+        return iso_bmff_media_type
+
+    return _sniff_ebml_media_type(content)
 
 
 @dataclass(frozen=True)
@@ -177,10 +319,24 @@ this comfortably covers several minutes of uncompressed CD-quality WAV.
 Same evidence caveat and override mechanism as
 `DEFAULT_MAX_SOURCE_MEDIA_UPLOAD_SIZE_BYTES` above."""
 
-SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES: frozenset[str] = frozenset({"audio/wav", "video/mp4"})
-"""Matches `infrastructure/media_processing/ffmpeg_adapter.py`'s own
-documented supported inputs exactly ("WAV as the audio input format and
-MP4 ... as the video container")."""
+SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES: frozenset[str] = frozenset(
+    {
+        "audio/wav",
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+        "video/x-matroska",
+        "video/x-msvideo",
+    }
+)
+"""The explicit S0002 source-video container expansion
+(`specs/S0002-common-video-container-source-media-support/spec.md`): WAV
+plus five common video containers, each routed through the same shared
+`infrastructure/media_processing/ffmpeg_adapter.py` FFmpeg-backed
+probe/extract path (`application/create_analysis.py`). Deliberately not
+derived from every format an installed FFmpeg build happens to report as
+readable -- this set is this project's own explicit, versioned product
+decision."""
 
 CUE_SUPPORTED_MEDIA_TYPES: frozenset[str] = frozenset({"audio/wav"})
 """A cue is a short reference audio clip; only the audio container

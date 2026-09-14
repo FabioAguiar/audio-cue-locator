@@ -7,7 +7,7 @@ enforced numeric limit (size, duration, cue count, concurrency, FFmpeg
 timeout), how each is configured, the structured-error behavior a client
 observes when a guardrail rejects a request, and two design decisions this
 issue makes and records (whether a processing timeout gets its own error
-category; the accepted WAV/MP4 probing asymmetry). It does not redefine
+category; the accepted WAV/video probing asymmetry). It does not redefine
 the product; see [`docs/architecture.md`](architecture.md) for the
 architectural boundaries these guardrails preserve and
 [`docs/rest-api-v1-contract.md`](rest-api-v1-contract.md) for the full
@@ -19,27 +19,43 @@ Support is an explicit product decision, never an accident of whatever an
 installed FFmpeg build happens to be able to open
 (`docs/architecture.md`, "O conjunto oficial de formatos nao deve ser
 derivado automaticamente do que FFmpeg aceita em uma instalacao
-especifica"):
+especifica"). S0002 (`specs/S0002-common-video-container-source-media-
+support/spec.md`) expanded the source-video container set from MP4-only to
+an explicit set of common video containers, all routed through the same
+shared FFmpeg-backed path; cues remain WAV-only:
 
 | Format | Role | Real probing performed |
 |---|---|---|
 | `audio/wav` (WAV/PCM) | source media and cue | Python standard-library `wave` module: opens and parses the RIFF/`WAVE` container, channel count, sample width, frame rate, and frame count; rejects anything that does not parse as a well-formed WAV container. |
-| `video/mp4` (MP4 with an embedded audio stream) | source media and cue | `ffprobe` (`FFmpegMediaAdapter.probe`) followed by `ffmpeg` audio-stream extraction (`FFmpegMediaAdapter.extract_audio`); rejects a container with no audio stream or that ffmpeg/ffprobe cannot parse. |
+| `video/mp4` (MP4/M4V, ISO-BMFF) | source media only | `ffprobe` (`FFmpegMediaAdapter.probe`) followed by `ffmpeg` audio-stream extraction (`FFmpegMediaAdapter.extract_audio`); rejects a container with no audio stream or that ffmpeg/ffprobe cannot parse. |
+| `video/quicktime` (MOV) | source media only | Same shared FFmpeg-backed probe/extract path as `video/mp4`. |
+| `video/webm` (WebM) | source media only | Same shared FFmpeg-backed probe/extract path as `video/mp4`. |
+| `video/x-matroska` (Matroska/MKV) | source media only | Same shared FFmpeg-backed probe/extract path as `video/mp4`. |
+| `video/x-msvideo` (AVI) | source media only | Same shared FFmpeg-backed probe/extract path as `video/mp4`. |
+
+A cue is never a video container in this project's documented scope: only
+`audio/wav` is accepted for `cue` uploads.
 
 Every upload is also magic-byte-sniffed at both upload time
 (`application/asset_ingestion.py`) and Analysis-creation time
 (`application/create_analysis.py`) before any of the above probing runs; a
 filename, file extension, or client-declared `Content-Type` header alone
-never establishes support.
+never establishes support. Trusted byte inspection for the video families
+above uses bounded ISO-BMFF `ftyp` major/compatible-brand evidence
+(`video/mp4` vs. `video/quicktime`) and bounded EBML `DocType` evidence
+(`video/webm` vs. `video/x-matroska`), never an extension or declared MIME
+type; an unrecognized or ambiguous brand/`DocType` is never accepted as
+support.
 
-### Decision: the WAV/MP4 probing difference is accepted, not a gap
+### Decision: the WAV/video probing difference is accepted, not a gap
 
 Native WAV content is validated only by the `wave` module plus the
-magic-byte sniff, never routed through `ffprobe`/`ffmpeg`; MP4 content is
-always routed through a real `ffprobe`/`ffmpeg` decode. This asymmetry was
-an open design question
+magic-byte sniff, never routed through `ffprobe`/`ffmpeg`; every supported
+video container is always routed through the same real `ffprobe`/`ffmpeg`
+decode (`FFmpegMediaAdapter`). This asymmetry was an open design question
 (`states/M7/M7-02/issue-operational-state.json` gap G5): whether WAV
-should also gain an `ffprobe`-based structural probe for parity with MP4.
+should also gain an `ffprobe`-based structural probe for parity with the
+video containers.
 
 **Decision:** the existing `wave`-module parse is accepted as sufficient
 "real media probing" for WAV, and no `ffprobe` call is added for it.
@@ -48,10 +64,10 @@ extension/declared-type check -- it parses the actual RIFF/`WAVE` chunk
 structure and raises on a malformed container
 (`application/create_analysis.py`'s `_wav_bytes_to_canonical_array`) --
 and WAV is an uncompressed, fully-specified PCM container with no codec
-ambiguity for `ffprobe` to additionally resolve, unlike MP4's compressed,
-multi-codec container. Adding a redundant `ffprobe` subprocess invocation
-for WAV would add latency and an additional FFmpeg-availability dependency
-without a corresponding increase in validation confidence.
+ambiguity for `ffprobe` to additionally resolve, unlike a compressed,
+multi-codec video container. Adding a redundant `ffprobe` subprocess
+invocation for WAV would add latency and an additional FFmpeg-availability
+dependency without a corresponding increase in validation confidence.
 
 This decision is revisited if representative testing (a future,
 separately authorized test-execution phase) finds a WAV input the `wave`

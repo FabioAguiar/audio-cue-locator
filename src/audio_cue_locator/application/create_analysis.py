@@ -59,7 +59,9 @@ a newly-discovered G9):
   existence/content-format validation *and* canonicalization (WAV parsing,
   resampling, downmixing, and peak normalization to
   `CANONICAL_AUDIO_SPEC`, reusing `infrastructure.media_processing.
-  FFmpegMediaAdapter.extract_audio` only for a `video/mp4` source) before
+  FFmpegMediaAdapter.extract_audio` through one shared helper for every
+  supported video source -- S0002, `specs/S0002-common-video-container-
+  source-media-support/spec.md`, not only `video/mp4` -- before
   `AnalysisRepositoryPort.create` ever persists a `QUEUED` record -- not
   after, as `intents/M5/M5-04/implementation-handoff.json` had left open.
   A request whose Asset content cannot be canonicalized therefore fails the
@@ -406,16 +408,39 @@ def _wav_bytes_to_canonical_array(
     return samples.astype(np.float32)
 
 
-def _mp4_bytes_to_canonical_array(
-    mp4_bytes: bytes,
+_VIDEO_MEDIA_TYPE_TEMP_SUFFIXES: dict[str, str] = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-matroska": ".mkv",
+    "video/x-msvideo": ".avi",
+}
+"""The one safe, fixed mapping the shared video canonicalization helper
+below uses to name its own temporary input file -- keyed by the already
+`sniff_media_type`-detected media type, never by a client-supplied
+filename or extension (S0002 acceptance: "no untrusted client filename is
+used as a temporary filesystem path"). `ffprobe`/`ffmpeg` do not require a
+container-matching suffix to decode correctly, but a real suffix keeps
+`FFmpegMediaAdapter`'s own diagnostics/logging container-identifiable."""
+
+
+def _video_bytes_to_canonical_array(
+    video_bytes: bytes,
+    media_type: str,
     adapter: FFmpegMediaAdapter,
     *,
     max_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
 ) -> np.ndarray:
-    """Decode an MP4 container's audio stream to WAV via the confirmed-
-    existing `FFmpegMediaAdapter.extract_audio` (this project's sole
-    permitted ffmpeg/ffprobe invocation point), then canonicalize the
-    resulting WAV bytes exactly like a native WAV upload.
+    """Decode any S0002-supported video container's audio stream to WAV via
+    the confirmed-existing `FFmpegMediaAdapter.extract_audio` (this
+    project's sole permitted ffmpeg/ffprobe invocation point), then
+    canonicalize the resulting WAV bytes exactly like a native WAV upload.
+
+    One shared helper serves every supported video media type
+    (`_VIDEO_MEDIA_TYPE_TEMP_SUFFIXES`) rather than one helper per
+    container -- `media_type` must already be an
+    `application.asset_ingestion.sniff_media_type` result, not a
+    client-supplied value.
 
     Probes the file first so an over-duration source is rejected before
     the (potentially slower) decode step runs, and so an FFmpeg/ffprobe
@@ -423,29 +448,62 @@ def _mp4_bytes_to_canonical_array(
     distinguishable from a genuinely malformed file -- at both the probe
     and the decode call (M7-02 gap G3)."""
 
+    suffix = _VIDEO_MEDIA_TYPE_TEMP_SUFFIXES.get(media_type)
+    if suffix is None:
+        raise AssetCanonicalizationError(
+            f"no FFmpeg-backed canonicalization path is defined for media "
+            f"type {media_type!r}"
+        )
+
     with tempfile.TemporaryDirectory() as tmp_dir:
-        input_path = Path(tmp_dir) / "input.mp4"
+        input_path = Path(tmp_dir) / f"input{suffix}"
         output_path = Path(tmp_dir) / "output.wav"
-        input_path.write_bytes(mp4_bytes)
+        input_path.write_bytes(video_bytes)
         try:
             probe_result = adapter.probe(str(input_path))
         except FFmpegTimeoutError as exc:
             raise AssetProcessingTimeoutError(
-                f"timed out while probing MP4 media: {exc}"
+                f"timed out while probing {media_type} media: {exc}"
             ) from exc
         except MediaProcessingError as exc:
-            raise AssetCanonicalizationError(f"could not probe MP4 media: {exc}") from exc
+            raise AssetCanonicalizationError(
+                f"could not probe {media_type} media: {exc}"
+            ) from exc
         _enforce_duration_limit(probe_result.duration_seconds, max_duration_seconds)
         try:
             adapter.extract_audio(str(input_path), str(output_path))
         except FFmpegTimeoutError as exc:
             raise AssetProcessingTimeoutError(
-                f"timed out while decoding MP4 audio: {exc}"
+                f"timed out while decoding {media_type} audio: {exc}"
             ) from exc
         except MediaProcessingError as exc:
-            raise AssetCanonicalizationError(f"could not decode MP4 audio: {exc}") from exc
+            raise AssetCanonicalizationError(
+                f"could not decode {media_type} audio: {exc}"
+            ) from exc
         wav_bytes = output_path.read_bytes()
     return _wav_bytes_to_canonical_array(wav_bytes, max_duration_seconds=max_duration_seconds)
+
+
+def _mp4_bytes_to_canonical_array(
+    mp4_bytes: bytes,
+    adapter: FFmpegMediaAdapter,
+    *,
+    max_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
+) -> np.ndarray:
+    """Preserved, name-stable thin wrapper over `_video_bytes_to_canonical_
+    array` for `video/mp4` specifically. `tests/operational/
+    test_guardrails.py` (a read-only reference for this issue -- outside
+    `repository_context.allowed_edit_paths`) imports this private helper by
+    its exact pre-S0002 name and calls it with its exact pre-S0002
+    positional signature; every other caller in this module (including the
+    real `video/mp4` dispatch path in `_resolve_and_canonicalize`) goes
+    through the single shared `_video_bytes_to_canonical_array` helper
+    directly, so this remains a compatibility shim, not a second
+    per-container implementation."""
+
+    return _video_bytes_to_canonical_array(
+        mp4_bytes, "video/mp4", adapter, max_duration_seconds=max_duration_seconds
+    )
 
 
 class CreateAnalysisUseCase:
@@ -591,8 +649,11 @@ class CreateAnalysisUseCase:
                 f"its role (detected {detected_media_type!r}, expected one "
                 f"of {sorted(allowed_media_types)!r})"
             )
-        if detected_media_type == "video/mp4":
-            return _mp4_bytes_to_canonical_array(
-                content, self._media_adapter, max_duration_seconds=max_duration_seconds
-            )
-        return _wav_bytes_to_canonical_array(content, max_duration_seconds=max_duration_seconds)
+        if detected_media_type == "audio/wav":
+            return _wav_bytes_to_canonical_array(content, max_duration_seconds=max_duration_seconds)
+        return _video_bytes_to_canonical_array(
+            content,
+            detected_media_type,
+            self._media_adapter,
+            max_duration_seconds=max_duration_seconds,
+        )

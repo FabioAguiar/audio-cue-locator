@@ -27,6 +27,16 @@ interface FixturePaths {
   noMatchCue: string;
 }
 
+/**
+ * S0002 (`specs/S0002-common-video-container-source-media-support/
+ * spec.md`): a small WebM source containing an audio stream, supplied by
+ * the same operator/environment-fixture convention as `fixturePaths()`
+ * above (no binary fixture is committed to the repository for this).
+ */
+function webmSourceMediaPath(): string {
+  return requiredEnvironmentValue("E2E_WEBM_SOURCE_MEDIA_PATH");
+}
+
 interface ApiCall {
   method: string;
   origin: string;
@@ -466,5 +476,53 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     );
     expect(countCalls(calls, "POST", /^\/api\/v1\/analyses$/)).toBe(0);
     assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
+  });
+
+  test("accepts a WebM source with audio through the real WebUI/API path (S0002)", async ({
+    page,
+  }) => {
+    test.setTimeout(analysisTimeoutMs + 30_000);
+    const baseUrl = webuiBaseUrl();
+    const fixtures = fixturePaths();
+    const webmSourceMedia = webmSourceMediaPath();
+    const calls = beginPublicApiAudit(page);
+
+    const sourceMediaResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/v1/assets/source-media",
+      { timeout: analysisTimeoutMs },
+    );
+
+    // `submitAnalysis` already asserts the standard success path (the
+    // Analysis heading appears, Status reaches "succeeded", and "View
+    // results" becomes visible) -- exactly what this scenario needs for
+    // "polling reaches a valid terminal state" and "an Analysis is
+    // created".
+    const analysisIdPromise = submitAnalysis(page, baseUrl, webmSourceMedia, [
+      fixtures.matchingCue,
+    ]);
+
+    // Not rejected as unsupported_media, and detected as video/webm --
+    // proven from the real upload response, not inferred from later steps.
+    const sourceMediaResponse = await sourceMediaResponsePromise;
+    expect(sourceMediaResponse.ok()).toBe(true);
+    const asset = (await sourceMediaResponse.json()) as {
+      media_type: string;
+    };
+    expect(asset.media_type).toBe("video/webm");
+
+    await analysisIdPromise;
+
+    // The result view remains functional for a WebM-sourced Analysis.
+    await openResultPage(page);
+    await expect(
+      page.getByRole("heading", { name: "Analysis result" }),
+    ).toBeVisible();
+
+    assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
+    expect(
+      countCalls(calls, "POST", /^\/api\/v1\/assets\/source-media$/),
+    ).toBe(1);
   });
 });

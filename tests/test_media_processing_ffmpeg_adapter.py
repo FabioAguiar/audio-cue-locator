@@ -221,3 +221,57 @@ def test_probe_and_extract_against_real_ffmpeg(tmp_path):
     output_path = tmp_path / "extracted.wav"
     extraction_result = adapter.extract_audio(str(wav_path), str(output_path))
     assert Path(extraction_result.output_path).is_file()
+
+
+# --- S0002: real FFmpeg probe/extract for every newly advertised video ------
+# --- container family, synthesized at test time (no committed binary       -
+# --- fixtures) -------------------------------------------------------------
+
+
+_S0002_VIDEO_SYNTHESIS_CASES = [
+    pytest.param("mp4", ["-c:a", "aac"], id="mp4"),
+    pytest.param("mov", ["-c:a", "aac"], id="mov"),
+    pytest.param("webm", ["-c:a", "libvorbis"], id="webm"),
+    pytest.param("mkv", ["-c:a", "pcm_s16le"], id="mkv"),
+    pytest.param("avi", ["-c:a", "pcm_s16le"], id="avi"),
+]
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe not available in this environment",
+)
+@pytest.mark.parametrize("extension,audio_codec_args", _S0002_VIDEO_SYNTHESIS_CASES)
+def test_probe_and_extract_against_real_ffmpeg_for_every_s0002_video_container(
+    tmp_path, extension, audio_codec_args
+):
+    """S0002 acceptance: real FFmpeg integration coverage synthesizes and
+    probe/extracts each newly advertised video-container family, mirroring
+    `test_probe_and_extract_against_real_ffmpeg` above's own real-tone
+    synthesis convention rather than a committed binary fixture. This is
+    the Infrastructure-layer evidence for the S0002 container expansion;
+    `application.asset_ingestion.sniff_media_type` byte-signature detection
+    for these same families is covered separately (`tests/
+    test_api_asset_upload.py`), and does not itself invoke FFmpeg."""
+
+    media_path = tmp_path / f"tone.{extension}"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+            *audio_codec_args,
+            str(media_path),
+        ],
+        shell=False,
+        check=True,
+        timeout=30,
+    )
+
+    adapter = FFmpegMediaAdapter()
+    probe_result = adapter.probe(str(media_path))
+    assert probe_result.has_audio_stream is True
+
+    output_path = tmp_path / f"extracted-{extension}.wav"
+    extraction_result = adapter.extract_audio(str(media_path), str(output_path))
+    assert Path(extraction_result.output_path).is_file()
+    assert Path(extraction_result.output_path).stat().st_size > 0

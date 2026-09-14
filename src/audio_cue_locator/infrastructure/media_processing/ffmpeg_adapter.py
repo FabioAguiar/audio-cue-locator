@@ -7,10 +7,20 @@ encapsulated behind one adapter ("FFmpeg"), and never invoked by
 interpolating untrusted input into a shell command ("Execucao de FFmpeg").
 No other module in this project may invoke ffmpeg or ffprobe directly.
 
-Supported inputs for this issue: WAV as the audio input format and MP4
-(with an embedded audio stream) as the video container. Canonical audio
-parameters (sample rate, channels, normalization) remain M1-03 decisions;
-extraction here only writes the decoded audio stream to a WAV file.
+Supported inputs: WAV as the native audio input format, plus the explicit
+set of video containers `application.asset_ingestion.
+SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES` recognizes and routes here for audio-
+stream extraction (S0002, `specs/S0002-common-video-container-source-
+media-support/spec.md`) -- MP4/M4V, MOV (QuickTime), WebM, Matroska/MKV,
+and AVI. This adapter performs no container-specific branching of its own:
+`ffprobe`/`ffmpeg` already handle each of these container formats
+generically through the same `probe`/`extract_audio` calls below. The
+authoritative supported-format allowlist remains Application's own,
+explicit, versioned decision (`application/asset_ingestion.py`), never
+derived from whatever formats an installed FFmpeg build happens to report
+as readable (`ffmpeg -formats`). Canonical audio parameters (sample rate,
+channels, normalization) remain M1-03 decisions; extraction here only
+writes the decoded audio stream to a WAV file.
 """
 
 from __future__ import annotations

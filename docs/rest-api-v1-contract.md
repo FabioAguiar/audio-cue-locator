@@ -44,7 +44,7 @@ The executable contract lives in these modules under
   delegates every decision to Application.
 - `application/create_analysis.py` (M5-04) — the Application-level
   asynchronous Analysis creation use case: cue-count validation, Asset
-  existence/content-compatibility checks, WAV/MP4-to-canonical-array
+  existence/content-compatibility checks, WAV/video-to-canonical-array
   resolution, a default effective-configuration policy, a documented
   no-idempotency baseline, and delegation to the existing M4-03
   `AnalysisRepositoryPort` and M4-04 `LocalAnalysisExecutor`.
@@ -321,18 +321,21 @@ identical client filename never collide.
 filename: `docs/asset-identity-and-storage.md` requires it to be "the
 result of trusted media inspection", not "a filename extension alone".
 `application/asset_ingestion.py`'s `sniff_media_type` inspects the
-payload's own leading bytes for the two container signatures
-`infrastructure/media_processing/ffmpeg_adapter.py` already documents as
-this project's supported inputs (a RIFF/WAVE header for `audio/wav`, an ISO
-base media file format `ftyp` box for `video/mp4`); a full FFmpeg
-decode/stream probe remains out of this issue's scope and happens later, at
-Analysis creation (M5-04) and matching.
+payload's own leading bytes for the bounded, explicit set of container
+signatures S0002 (`specs/S0002-common-video-container-source-media-
+support/spec.md`) defines: a RIFF/WAVE header for `audio/wav`, a RIFF/AVI
+header for `video/x-msvideo`, bounded ISO-BMFF `ftyp` major/compatible-
+brand evidence distinguishing `video/mp4` from `video/quicktime`, and
+bounded EBML `DocType` evidence distinguishing `video/webm` from
+`video/x-matroska`. A full FFmpeg decode/stream probe remains out of this
+issue's scope and happens later, at Analysis creation (M5-04) and
+matching.
 
 ### Explicit, configurable limits
 
 | Logical type | Endpoint | Default max size | Supported media types |
 |---|---|---:|---|
-| `source_media` | `/api/v1/assets/source-media` | 500 MiB | `audio/wav`, `video/mp4` |
+| `source_media` | `/api/v1/assets/source-media` | 500 MiB | `audio/wav`, `video/mp4`, `video/quicktime`, `video/webm`, `video/x-matroska`, `video/x-msvideo` |
 | `cue` | `/api/v1/assets/cue` | 50 MiB | `audio/wav` |
 
 Both defaults (`application/asset_ingestion.py`,
@@ -451,19 +454,23 @@ validation, before `AnalysisRepositoryPort.create` ever persists a
    `AssetNotFoundError`, already mapped to 404, if it does not exist) and
    its content is inspected with the existing
    `application.asset_ingestion.sniff_media_type` (reused, not
-   reimplemented). A source must sniff as `audio/wav` or `video/mp4`; a
-   cue must sniff as `audio/wav`. A mismatch raises `errors.
+   reimplemented). A source must sniff as `audio/wav` or one of the
+   S0002 video media types (`video/mp4`, `video/quicktime`,
+   `video/webm`, `video/x-matroska`, `video/x-msvideo`); a cue must
+   sniff as `audio/wav`. A mismatch raises `errors.
    UnsupportedMediaError` (415).
 2. **Canonicalization**: the same already-read bytes are decoded and
    converted into a `CANONICAL_AUDIO_SPEC`-conformant (mono, float32,
    48000 Hz, peak-normalized) NumPy array — a WAV payload is parsed
    directly with the standard-library `wave` module (downmixed and
-   resampled with `numpy`/`scipy` as needed); an MP4 payload is first
-   decoded to WAV via the existing, sole-permitted
-   `infrastructure.media_processing.FFmpegMediaAdapter.extract_audio`.
-   Content that sniffs as a supported container but cannot actually be
-   decoded (a malformed WAV, or audio `ffmpeg`/`ffprobe` cannot decode)
-   raises `errors.UnsupportedMediaError` (415) via `application.
+   resampled with `numpy`/`scipy` as needed); any of the five S0002
+   video payloads is first decoded to WAV via the same existing,
+   sole-permitted `infrastructure.media_processing.
+   FFmpegMediaAdapter.extract_audio`, through one shared Application
+   helper rather than a video-container-specific matcher path. Content
+   that sniffs as a supported container but cannot actually be decoded
+   (a malformed WAV, or audio `ffmpeg`/`ffprobe` cannot decode) raises
+   `errors.UnsupportedMediaError` (415) via `application.
    create_analysis.AssetCanonicalizationError`.
 
 **Why this is synchronous, not deferred to the async executor stage:**

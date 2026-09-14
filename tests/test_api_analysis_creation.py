@@ -36,6 +36,7 @@ import pytest
 from pydantic import ValidationError
 from starlette.responses import Response
 
+from audio_cue_locator.application.asset_ingestion import sniff_media_type
 from audio_cue_locator.application.create_analysis import (
     AssetCanonicalizationError,
     AssetContentIncompatibleError,
@@ -50,6 +51,14 @@ from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository impo
 )
 from audio_cue_locator.infrastructure.media_processing.canonical_audio import (
     CANONICAL_AUDIO_SPEC,
+)
+from audio_cue_locator.infrastructure.media_processing.errors import (
+    FFmpegTimeoutError,
+    InvalidMediaError,
+)
+from audio_cue_locator.infrastructure.media_processing.models import (
+    ExtractionResult,
+    ProbeResult,
 )
 from audio_cue_locator.interfaces.rest_api.analysis_routes import (
     STATUS_LOCATION_HEADER,
@@ -98,6 +107,99 @@ def _malformed_wav_bytes() -> bytes:
     # A real RIFF/WAVE header (so sniff_media_type detects "audio/wav")
     # followed by bytes that are not a valid fmt/data chunk structure.
     return b"RIFF" + (16).to_bytes(4, "little") + b"WAVEnotachunk!!!"
+
+
+def _fake_avi_bytes(total_size: int = 64) -> bytes:
+    header = b"RIFF" + max(total_size - 8, 0).to_bytes(4, "little") + b"AVI "
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _fake_mov_bytes(total_size: int = 64) -> bytes:
+    header = (16).to_bytes(4, "big") + b"ftyp" + b"qt  " + b"\x00\x00\x00\x00"
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _build_ebml_bytes(doctype: str, total_size: int = 64) -> bytes:
+    doctype_bytes = doctype.encode("ascii")
+    doctype_element = bytes([0x42, 0x82, 0x80 | len(doctype_bytes)]) + doctype_bytes
+    header = b"\x1a\x45\xdf\xa3" + bytes([0x80 | len(doctype_element)]) + doctype_element
+    return header + b"\x00" * max(0, total_size - len(header))
+
+
+def _fake_webm_bytes(total_size: int = 64) -> bytes:
+    return _build_ebml_bytes("webm", total_size)
+
+
+def _fake_mkv_bytes(total_size: int = 64) -> bytes:
+    return _build_ebml_bytes("matroska", total_size)
+
+
+_ALL_S0002_VIDEO_CONTENT_BUILDERS = [
+    pytest.param(_make_mp4_bytes, ".mp4", id="mp4"),
+    pytest.param(_fake_mov_bytes, ".mov", id="mov"),
+    pytest.param(_fake_webm_bytes, ".webm", id="webm"),
+    pytest.param(_fake_mkv_bytes, ".mkv", id="mkv"),
+    pytest.param(_fake_avi_bytes, ".avi", id="avi"),
+]
+
+
+class _StubMediaAdapter:
+    """A deterministic, in-process stand-in for `FFmpegMediaAdapter` (no
+    real ffmpeg/ffprobe subprocess involved), used only to prove
+    `CreateAnalysisUseCase`'s own dispatch/translation logic for each S0002
+    video media type. Real FFmpeg extraction evidence for these container
+    families lives in `tests/test_media_processing_ffmpeg_adapter.py` and
+    `tests/e2e/test_m7_baseline.py`'s real WebM scenario -- this stub is
+    deliberately not the only evidence for WebM support."""
+
+    def __init__(
+        self,
+        *,
+        wav_bytes: bytes = b"",
+        duration_seconds: float | None = 0.5,
+        has_audio_stream: bool = True,
+        raise_on_probe: Exception | None = None,
+        raise_on_extract: Exception | None = None,
+    ) -> None:
+        self._wav_bytes = wav_bytes
+        self._duration_seconds = duration_seconds
+        self._has_audio_stream = has_audio_stream
+        self._raise_on_probe = raise_on_probe
+        self._raise_on_extract = raise_on_extract
+        self.probed_paths: list[str] = []
+        self.extracted_paths: list[str] = []
+
+    def probe(self, media_path: str) -> ProbeResult:
+        self.probed_paths.append(media_path)
+        if self._raise_on_probe is not None:
+            raise self._raise_on_probe
+        return ProbeResult(
+            container_format="stub",
+            duration_seconds=self._duration_seconds,
+            has_audio_stream=self._has_audio_stream,
+            audio_stream_index=0 if self._has_audio_stream else None,
+            audio_codec_name="pcm_s16le" if self._has_audio_stream else None,
+            sample_rate=8000 if self._has_audio_stream else None,
+            channels=1 if self._has_audio_stream else None,
+        )
+
+    def extract_audio(self, media_path: str, output_path: str) -> ExtractionResult:
+        self.extracted_paths.append(media_path)
+        if self._raise_on_extract is not None:
+            raise self._raise_on_extract
+        Path(output_path).write_bytes(self._wav_bytes)
+        return ExtractionResult(output_path=output_path, sample_rate=8000, channels=1)
+
+
+def _wait_for_terminal_state(use_case, analysis_id: str) -> AnalysisLifecycleState:
+    reader = SQLiteAnalysisRepository(use_case._repository._database_path)
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        record = reader.get(analysis_id)
+        if record.state in (AnalysisLifecycleState.SUCCEEDED, AnalysisLifecycleState.FAILED):
+            return record.state
+        time.sleep(0.02)
+    raise AssertionError(f"Analysis {analysis_id!r} did not reach a terminal state")
 
 
 @pytest.fixture()
@@ -257,3 +359,104 @@ def test_wav_canonicalization_rejects_malformed_content():
 def test_canonical_spec_matches_infrastructure_target():
     array = _wav_bytes_to_canonical_array(_make_wav_bytes(sample_rate=48000))
     assert array.dtype.name == CANONICAL_AUDIO_SPEC.sample_format
+
+
+# --- S0002: every supported video type dispatches through the shared path --
+
+
+@pytest.mark.parametrize("content_builder,extension", _ALL_S0002_VIDEO_CONTENT_BUILDERS)
+def test_every_supported_video_source_type_dispatches_through_shared_ffmpeg_path(
+    use_case, cue_asset_id, content_builder, extension
+):
+    media_type = sniff_media_type(content_builder())
+    source_asset = use_case._asset_storage.ingest(
+        content_builder(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name=f"source{extension}",
+        detected_media_type=media_type,
+    )
+    stub_adapter = _StubMediaAdapter(wav_bytes=_make_wav_bytes())
+    use_case._media_adapter = stub_adapter
+
+    payload = _payload(source_asset.identifier, cue_asset_id)
+    response = _create_analysis(payload, Response(), use_case)
+    assert response.status == AnalysisStatus.QUEUED
+
+    final_state = _wait_for_terminal_state(use_case, response.analysis_id)
+    assert final_state is AnalysisLifecycleState.SUCCEEDED
+    assert stub_adapter.probed_paths and stub_adapter.probed_paths[0].endswith(extension)
+    assert stub_adapter.extracted_paths and stub_adapter.extracted_paths[0].endswith(extension)
+
+
+@pytest.mark.parametrize(
+    "content_builder",
+    [_fake_avi_bytes, _fake_mov_bytes, _fake_webm_bytes, _fake_mkv_bytes, _make_mp4_bytes],
+)
+def test_video_asset_supplied_as_cue_is_rejected_as_unsupported_media_for_every_s0002_type(
+    use_case, source_asset_id, content_builder
+):
+    media_type = sniff_media_type(content_builder())
+    video_cue = use_case._asset_storage.ingest(
+        content_builder(),
+        logical_type=AssetType.CUE,
+        informative_name="cue.bin",
+        detected_media_type=media_type,
+    )
+    payload = _payload(source_asset_id, video_cue.identifier)
+    with pytest.raises(UnsupportedMediaError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+def test_uncanonicalizable_video_source_is_rejected_before_persistence(use_case, cue_asset_id):
+    source_asset = use_case._asset_storage.ingest(
+        _fake_webm_bytes(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="broken.webm",
+        detected_media_type="video/webm",
+    )
+    use_case._media_adapter = _StubMediaAdapter(
+        raise_on_extract=InvalidMediaError("bad video")
+    )
+
+    payload = _payload(source_asset.identifier, cue_asset_id)
+    with pytest.raises(UnsupportedMediaError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+def test_video_source_with_no_audio_stream_is_rejected_before_persistence(use_case, cue_asset_id):
+    source_asset = use_case._asset_storage.ingest(
+        _fake_mkv_bytes(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="video-only.mkv",
+        detected_media_type="video/x-matroska",
+    )
+    use_case._media_adapter = _StubMediaAdapter(
+        has_audio_stream=False,
+        raise_on_extract=InvalidMediaError("no audio stream"),
+    )
+
+    payload = _payload(source_asset.identifier, cue_asset_id)
+    with pytest.raises(UnsupportedMediaError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+def test_video_source_ffmpeg_timeout_is_translated_and_rejected_before_persistence(
+    use_case, cue_asset_id
+):
+    source_asset = use_case._asset_storage.ingest(
+        _fake_webm_bytes(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="slow.webm",
+        detected_media_type="video/webm",
+    )
+    use_case._media_adapter = _StubMediaAdapter(
+        raise_on_probe=FFmpegTimeoutError("timed out probing")
+    )
+
+    payload = _payload(source_asset.identifier, cue_asset_id)
+    with pytest.raises(UnsupportedMediaError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
