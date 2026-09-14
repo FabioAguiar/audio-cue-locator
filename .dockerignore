@@ -1,0 +1,81 @@
+# Version control / editors
+.git
+.gitignore
+.github
+.vscode/
+.idea/
+.DS_Store
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+*.egg-info/
+
+# Node / WebUI build artifacts (rebuilt inside the image, not copied into it)
+node_modules/
+webui/node_modules/
+dist/
+webui/dist/
+build/
+
+# Local runtime data, persistence, and derived artifacts -- never build context
+var/
+runtime/
+state/
+data/raw/
+data/interim/
+data/processed/
+uploads/
+media/uploads/
+media/runtime/
+storage/
+artifacts/
+canonical/
+canonical-audio/
+processed-audio/
+audio-cache/
+waveforms/
+previews/
+exports/
+reports/
+cache/
+.cache/
+tmp/
+temp/
+docker-data/
+volumes/
+.local-volumes/
+
+# Secrets and environment files -- never build context
+.env
+.env.*
+*.env
+secrets.*
+credentials.*
+*.pem
+*.key
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Not needed inside either image
+docs/
+tests/
+benchmarks/
+*.md
+!README.md

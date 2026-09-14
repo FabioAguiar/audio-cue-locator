@@ -4,7 +4,7 @@ Audio Cue Locator is an independent tool for locating reference acoustic cues in
 
 The project is designed to accept a source media file together with one or more reference cues, analyze the audio, and return structured temporal occurrences with similarity scores that can be inspected by a user or consumed programmatically.
 
-> **Project status:** early development. The project is currently at **M1 — Foundation and Canonical Media Pipeline**. The repository contains the approved vision, architecture, milestone plan, and operational milestone state; the executable application has not been implemented yet.
+> **Project status:** active development. Milestones M1-M6 are complete, delivering the canonical media pipeline, acoustic matching, the Analysis/Cue/Occurrence core, local SQLite/filesystem persistence, a versioned REST API v1, and a standalone WebUI. The project is currently at **M7 — Baseline Operacional Reproduzível**, packaging that functional baseline into a reproducible, clean-environment-buildable local runtime; see [Local Operation](#local-operation) below.
 
 ## What the Project Intends to Do
 
@@ -105,21 +105,11 @@ A score expresses the output of a matching method. It must not be presented as c
 
 The current operational milestone is:
 
-**M1 — Foundation and Canonical Media Pipeline**
+**M7 — Baseline Operacional Reproduzível**
 
-Its purpose is to establish an executable Python project and a deterministic pipeline capable of turning supported audio or video inputs into a canonical audio representation suitable for later matching.
+Milestones M1 through M6 are complete: canonical media pipeline, acoustic matching, the Analysis/Cue/Occurrence core with structured results, local SQLite/filesystem persistence, versioned REST API v1, and a standalone WebUI. M7 packages that existing functional baseline into a reproducible, clean-environment-buildable local runtime with controlled dependencies, predictable FFmpeg availability, safe example configuration, and a documented build/start/stop/health procedure. See [`docs/milestones.md`](docs/milestones.md) for the full milestone plan and Definition of Done.
 
-M1 is expected to validate, rather than assume:
-
-- the initial supported media formats;
-- canonical sample representation;
-- channel configuration;
-- sample rate;
-- whether amplitude normalization belongs in the baseline;
-- FFmpeg probing and decoding behavior;
-- deterministic test fixtures and error handling.
-
-No milestone has been completed yet.
+See [Local Operation](#local-operation) below for the packaged runtime this milestone establishes.
 
 ## Planned Milestones
 
@@ -177,11 +167,29 @@ The current repository documentation is the authoritative starting point for the
 
 The milestone plan and operational state are intentionally separate: `docs/milestones.md` describes planned evolution, while the state file records which milestone is currently active.
 
+## Local Operation
+
+The complete backend (FastAPI REST API v1, SQLite/filesystem persistence, FFmpeg-backed Media Processing) and the standalone WebUI are packaged as two container images built from a single [`Dockerfile`](Dockerfile) and orchestrated by [`compose.yaml`](compose.yaml):
+
+```bash
+docker compose build
+docker compose up
+```
+
+- REST API v1: `http://localhost:8000/api/v1` (health check: `GET /api/v1/health`)
+- WebUI: `http://localhost:8080`
+
+Stop the runtime with:
+
+```bash
+docker compose down
+```
+
+See [`docs/local-operation.md`](docs/local-operation.md) for the full clean-build, startup, shutdown, storage, health-check, and configuration reference, including the two-container topology's rationale and known limitations.
+
 ## Development Status
 
-The repository is **not yet ready for installation or production use**.
-
-Installation, execution, API, WebUI, container, and supported-format instructions will be added only after the corresponding capabilities are materially implemented and validated.
+Local installation and execution are documented in [Local Operation](#local-operation) above, via the packaged Docker/Compose runtime established during M7. Public or multi-user deployment is out of scope until a separate, explicitly authorized security review permits it (see [`docs/architecture.md`](docs/architecture.md)).
 
 ## License
 

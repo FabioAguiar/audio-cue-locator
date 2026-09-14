@@ -1,0 +1,35 @@
+services:
+  api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "8000:8000"
+    environment:
+      # Explicit, non-secret local storage configuration (both variables are
+      # already supported by src/audio_cue_locator/interfaces/rest_api/app.py
+      # and default to these same relative paths; restated here so the
+      # runtime's configuration is explicit rather than implicit).
+      AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT: var/asset_storage
+      AUDIO_CUE_LOCATOR_ANALYSIS_DB_PATH: var/analysis_repository.sqlite3
+    volumes:
+      # Named volume, not a host bind mount: keeps local SQLite/filesystem
+      # persistence local-first without writing runtime data into the
+      # repository working tree.
+      - api-data:/app/var
+
+  webui:
+    build:
+      context: .
+      target: webui
+    ports:
+      - "8080:80"
+    depends_on:
+      # Waits for the `api` image's own HEALTHCHECK (Dockerfile) to report
+      # healthy before starting, since the WebUI's static build calls
+      # `/api/v1` through this container's own reverse proxy.
+      api:
+        condition: service_healthy
+
+volumes:
+  api-data:

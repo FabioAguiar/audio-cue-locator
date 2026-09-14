@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Standalone WebUI for Audio Cue Locator; a pure client of the REST API v1.",
+  "engines": {
+    "node": ">=20 <21"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
