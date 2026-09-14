@@ -4,7 +4,10 @@ services:
       context: .
       target: api
     ports:
-      - "8000:8000"
+      # Expose the ACL API only on the VPS loopback interface.
+      # Access from the local workstation is expected through the SSH tunnel:
+      #   localhost:18000 -> VPS localhost:18000 -> container:8000
+      - "127.0.0.1:18000:8000"
     environment:
       # Explicit, non-secret local storage configuration (both variables are
       # already supported by src/audio_cue_locator/interfaces/rest_api/app.py
@@ -23,7 +26,16 @@ services:
       context: .
       target: webui
     ports:
-      - "8080:80"
+      # Expose the ACL WebUI only on the VPS loopback interface.
+      # Access from the local workstation is expected through the SSH tunnel:
+      #   localhost:18081 -> VPS localhost:18081 -> container:80
+      - "127.0.0.1:18081:80"
+    volumes:
+      # Effective Nginx server configuration for this service (S0001): the
+      # supported Compose runtime uses this file instead of the Dockerfile's
+      # embedded fallback, so the /api/v1/ proxy does not impose its own
+      # upload-size ceiling. Read-only: this container never writes to it.
+      - ./webui/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       # Waits for the `api` image's own HEALTHCHECK (Dockerfile) to report
       # healthy before starting, since the WebUI's static build calls

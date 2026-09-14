@@ -127,6 +127,41 @@ function assertOnlyDocumentedPublicApiCalls(
   }
 }
 
+/**
+ * Builds a deterministic, valid PCM WAV buffer at least `minTotalBytes`
+ * long (S0001). Content is silence; only the RIFF/`WAVE` container needs
+ * to be well-formed, since the goal is to cross the *old* Nginx default
+ * `client_max_body_size` (1m) while staying far below ACL's configured
+ * 500 MiB source-media limit -- not to exercise media-processing content.
+ */
+function buildDeterministicWavBuffer(minTotalBytes: number): Buffer {
+  const headerBytes = 44;
+  const numChannels = 1;
+  const sampleRate = 44100;
+  const bitsPerSample = 16;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const rawDataBytes = Math.max(blockAlign, minTotalBytes - headerBytes);
+  const dataBytes = rawDataBytes + (rawDataBytes % blockAlign);
+
+  const header = Buffer.alloc(headerBytes);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + dataBytes, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(dataBytes, 40);
+
+  return Buffer.concat([header, Buffer.alloc(dataBytes)]);
+}
+
 function countCalls(
   calls: ApiCall[],
   method: string,
@@ -324,6 +359,62 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     expect(envelope.result.cues[0].outcome.kind).toBe("no_match");
 
     assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
+  });
+
+  test("proxies a source-media upload larger than the old Nginx body-size ceiling through to the API (S0001)", async ({
+    page,
+  }) => {
+    test.setTimeout(analysisTimeoutMs + 30_000);
+    const baseUrl = webuiBaseUrl();
+    const fixtures = fixturePaths();
+    const calls = beginPublicApiAudit(page);
+
+    // Nginx's own historical default (`client_max_body_size 1m`, unset in
+    // the pre-S0001 embedded config) is 1,048,576 bytes. 2 MiB clears that
+    // ceiling with margin while staying far below ACL's 500 MiB limit, so
+    // this proves the proxy boundary without needing a 287 MB fixture.
+    const largeSourceMedia = buildDeterministicWavBuffer(2 * 1024 * 1024);
+
+    await openSubmissionPage(page, baseUrl);
+    await page.getByLabel("Source media", { exact: true }).setInputFiles({
+      name: "proxy-boundary-source.wav",
+      mimeType: "audio/wav",
+      buffer: largeSourceMedia,
+    });
+    await page
+      .getByLabel("Cue 1", { exact: true })
+      .setInputFiles(fixtures.matchingCue);
+
+    const sourceMediaResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/v1/assets/source-media",
+      { timeout: analysisTimeoutMs },
+    );
+    await page
+      .getByRole("button", { name: "Submit and create Analysis" })
+      .click();
+
+    const sourceMediaResponse = await sourceMediaResponsePromise;
+
+    // A proxy-generated rejection would be a 413 from Nginx itself, before
+    // ACL's own bounded upload handling ever runs. Proving ACL answered
+    // (a real, well-formed AssetPublic body) rather than a proxy 413 is
+    // exactly the observable this regression is for.
+    expect(sourceMediaResponse.status()).not.toBe(413);
+    expect(sourceMediaResponse.ok()).toBe(true);
+
+    const asset = (await sourceMediaResponse.json()) as {
+      size_bytes: number;
+      media_type: string;
+    };
+    expect(asset.media_type).toBe("audio/wav");
+    expect(asset.size_bytes).toBe(largeSourceMedia.length);
+
+    assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
+    expect(
+      countCalls(calls, "POST", /^\/api\/v1\/assets\/source-media$/),
+    ).toBe(1);
   });
 
   test("renders only the sanitized Error contract for rejected media", async ({

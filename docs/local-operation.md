@@ -25,7 +25,16 @@ build targets, orchestrated by [`compose.yaml`](../compose.yaml):
   behavior is changed by this packaging.
 - **`webui`** -- the standalone WebUI (`webui/`), compiled to static
   assets and served by a minimal Nginx that also reverse-proxies
-  `/api/v1/*` requests to the `api` service.
+  `/api/v1/*` requests to the `api` service. `compose.yaml` mounts
+  [`webui/nginx/default.conf`](../webui/nginx/default.conf) read-only as
+  this container's effective `/etc/nginx/conf.d/default.conf`; the
+  Dockerfile's embedded Nginx configuration remains only as that image's
+  fallback outside the supported Compose runtime. Upload-size policy stays
+  entirely API-owned: the `/api/v1/` proxy location imposes no product-level
+  request-body ceiling of its own and does not buffer a proxied upload
+  before forwarding it, so `api`'s own bounded upload handling (see "Safe
+  example configuration" below) is the first product-policy boundary an
+  upload meets.
 
 This is a **two-container** topology, not the single container that
 `docs/architecture.md`'s "Containerização" guidance prefers by default.
