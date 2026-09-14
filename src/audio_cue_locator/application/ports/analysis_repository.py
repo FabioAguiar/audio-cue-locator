@@ -59,6 +59,7 @@ not replace or reinterpret either existing field.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -69,6 +70,14 @@ from audio_cue_locator.core.analysis_result import (
     StructuredError,
 )
 from audio_cue_locator.core.asset import validate_asset_identifier
+
+MAX_CUE_LABEL_CODEPOINTS = 80
+"""S0003: the maximum length, in Unicode code points, of a normalized,
+non-null `CueAssetReference.label`. Mirrors
+`application.create_analysis.MAX_CUE_LABEL_CODEPOINTS`; declared
+independently here so this module never depends on `application.
+create_analysis` (`docs/architecture.md`, Principle 2 -- Application ports
+do not import Application use cases)."""
 
 
 class AnalysisNotFoundError(LookupError):
@@ -89,16 +98,35 @@ class InvalidAnalysisRecordError(ValueError):
 @dataclass(frozen=True)
 class CueAssetReference:
     """One Cue's identity paired with its M4-02 logical Asset reference
-    (`docs/analysis-core-contracts.md`, section 2, `Cue.asset_reference`).
+    (`docs/analysis-core-contracts.md`, section 2, `Cue.asset_reference`),
+    plus S0003's optional, presentation-only `label` and optional
+    Cue-local `trim_start_seconds`/`trim_end_seconds` processing bounds.
 
     `asset_id` is validated as a canonical Asset identifier
     (`core.asset.validate_asset_identifier`); it is never a filesystem path,
     matching the M4-02 Asset Identity vs Storage Location boundary this
-    repository must preserve.
+    repository must preserve. `label`/`trim_start_seconds`/
+    `trim_end_seconds` never influence matching, acceptance, score,
+    occurrence selection, or source position (S0003 acceptance).
+
+    `__post_init__` enforces every persisted-value invariant for the new
+    fields independently of `interfaces.rest_api.schemas`/Pydantic and of
+    `application.create_analysis.CueRequest`'s own normalization, so a
+    non-HTTP Application caller that constructs this type directly cannot
+    persist an inconsistent record: a non-null `label` must already be
+    normalized (no surrounding whitespace, non-blank, at most
+    `MAX_CUE_LABEL_CODEPOINTS`), and a non-null trim bound must be a
+    finite, non-negative number, with `trim_start_seconds` strictly less
+    than `trim_end_seconds` whenever both are present. It does not (and
+    cannot, without decoding media) check either bound against the Cue's
+    actual duration; that remains `application.create_analysis`'s job.
     """
 
     cue_id: str
     asset_id: str
+    label: str | None = None
+    trim_start_seconds: float | None = None
+    trim_end_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.cue_id, str) or not self.cue_id.strip():
@@ -106,6 +134,54 @@ class CueAssetReference:
                 "CueAssetReference.cue_id must be a non-empty string"
             )
         validate_asset_identifier(self.asset_id)
+
+        if self.label is not None:
+            if not isinstance(self.label, str):
+                raise InvalidAnalysisRecordError(
+                    "CueAssetReference.label must be a string or None"
+                )
+            if self.label != self.label.strip():
+                raise InvalidAnalysisRecordError(
+                    "CueAssetReference.label must not have surrounding "
+                    "whitespace"
+                )
+            if self.label == "":
+                raise InvalidAnalysisRecordError(
+                    "CueAssetReference.label must be None rather than blank"
+                )
+            if len(self.label) > MAX_CUE_LABEL_CODEPOINTS:
+                raise InvalidAnalysisRecordError(
+                    "CueAssetReference.label must be at most "
+                    f"{MAX_CUE_LABEL_CODEPOINTS} Unicode code points"
+                )
+
+        for field_name in ("trim_start_seconds", "trim_end_seconds"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise InvalidAnalysisRecordError(
+                    f"CueAssetReference.{field_name} must be a finite "
+                    "non-negative number or None"
+                )
+            if not math.isfinite(value):
+                raise InvalidAnalysisRecordError(
+                    f"CueAssetReference.{field_name} must be finite"
+                )
+            if value < 0:
+                raise InvalidAnalysisRecordError(
+                    f"CueAssetReference.{field_name} must be >= 0"
+                )
+
+        if (
+            self.trim_start_seconds is not None
+            and self.trim_end_seconds is not None
+            and not self.trim_start_seconds < self.trim_end_seconds
+        ):
+            raise InvalidAnalysisRecordError(
+                "CueAssetReference.trim_start_seconds must be strictly "
+                "less than trim_end_seconds"
+            )
 
 
 @dataclass(frozen=True)

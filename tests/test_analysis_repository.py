@@ -62,11 +62,13 @@ def _create_record(
     analysis_id: str = "analysis-1",
     source_asset_id: str | None = None,
     cue_asset_id: str | None = None,
+    cues: tuple[CueAssetReference, ...] | None = None,
 ):
     return repository.create(
         analysis_id=analysis_id,
         source_asset_id=source_asset_id or _asset_id(),
-        cues=(CueAssetReference(cue_id="cue-1", asset_id=cue_asset_id or _asset_id()),),
+        cues=cues
+        or (CueAssetReference(cue_id="cue-1", asset_id=cue_asset_id or _asset_id()),),
         effective_configuration=_configuration(),
         queued_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
@@ -344,3 +346,179 @@ def test_existing_m4_03_row_migrates_with_empty_owned_assets(tmp_path: Path):
         record = repository.get("legacy-analysis")
 
     assert record.owned_asset_ids == ()
+
+
+# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+
+
+def test_cue_label_and_trim_bounds_survive_create_get_round_trip(tmp_path: Path):
+    database_path = tmp_path / "analyses.sqlite"
+    cue = CueAssetReference(
+        cue_id="cue-1",
+        asset_id=_asset_id(),
+        label="Chorus hit",
+        trim_start_seconds=1.5,
+        trim_end_seconds=3.25,
+    )
+    with SQLiteAnalysisRepository(database_path) as repository:
+        created = _create_record(repository, cues=(cue,))
+
+    with SQLiteAnalysisRepository(database_path) as reopened:
+        persisted = reopened.get(created.analysis_id)
+
+    assert persisted == created
+    assert persisted.cues[0].label == "Chorus hit"
+    assert persisted.cues[0].trim_start_seconds == 1.5
+    assert persisted.cues[0].trim_end_seconds == 3.25
+
+
+def test_cue_label_and_trim_bounds_survive_transition_reopen(tmp_path: Path):
+    database_path = tmp_path / "analyses.sqlite"
+    cue = CueAssetReference(
+        cue_id="cue-1",
+        asset_id=_asset_id(),
+        label="Intro sting",
+        trim_start_seconds=0.0,
+        trim_end_seconds=2.0,
+    )
+    with SQLiteAnalysisRepository(database_path) as repository:
+        _create_record(repository, cues=(cue,))
+        repository.transition(
+            "analysis-1",
+            AnalysisLifecycleState.RUNNING,
+            at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+        transitioned = repository.transition(
+            "analysis-1",
+            AnalysisLifecycleState.SUCCEEDED,
+            at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            result_reference="result:1",
+        )
+
+    assert transitioned.cues[0].label == "Intro sting"
+    assert transitioned.cues[0].trim_start_seconds == 0.0
+    assert transitioned.cues[0].trim_end_seconds == 2.0
+
+    with SQLiteAnalysisRepository(database_path) as reopened:
+        persisted = reopened.get("analysis-1")
+
+    assert persisted.cues[0].label == "Intro sting"
+    assert persisted.cues[0].trim_start_seconds == 0.0
+    assert persisted.cues[0].trim_end_seconds == 2.0
+
+
+def test_cue_with_only_a_label_and_no_trim_bounds_round_trips(tmp_path: Path):
+    cue = CueAssetReference(cue_id="cue-1", asset_id=_asset_id(), label="Just a label")
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        created = _create_record(repository, cues=(cue,))
+        persisted = repository.get(created.analysis_id)
+
+    assert persisted.cues[0].label == "Just a label"
+    assert persisted.cues[0].trim_start_seconds is None
+    assert persisted.cues[0].trim_end_seconds is None
+
+
+def test_legacy_cues_json_without_s0003_fields_deserializes_with_none_values(
+    tmp_path: Path,
+):
+    """A `cues_json` row written before S0003 (only `cue_id`/`asset_id`,
+    no `label`/`trim_start_seconds`/`trim_end_seconds` keys at all) must
+    still load successfully, with every new field `None` -- no SQLite
+    table-schema migration is required for this compatibility path."""
+
+    database_path = tmp_path / "legacy.sqlite"
+    source_asset_id = _asset_id()
+    cue_asset_id = _asset_id()
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE analyses ("
+        "analysis_id TEXT PRIMARY KEY, state TEXT NOT NULL, "
+        "source_asset_id TEXT NOT NULL, cues_json TEXT NOT NULL, "
+        "effective_configuration_json TEXT NOT NULL, "
+        "lifecycle_timestamps_json TEXT NOT NULL, "
+        "owned_asset_ids_json TEXT NOT NULL DEFAULT '[]', "
+        "result_reference TEXT, structured_error_json TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO analyses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy-analysis",
+            "queued",
+            source_asset_id,
+            # Deliberately pre-S0003 shape: only cue_id/asset_id keys.
+            json.dumps([{"cue_id": "cue-1", "asset_id": cue_asset_id}]),
+            json.dumps(
+                {
+                    "canonicalization": {
+                        "sample_rate_hz": 48_000,
+                        "channels": 1,
+                        "sample_format": "float32",
+                        "normalization": {
+                            "enabled": True,
+                            "method": "peak",
+                            "target_peak_amplitude": 1.0,
+                        },
+                    },
+                    "matching": {
+                        "method": "normalized_cross_correlation_v1",
+                        "acceptance_threshold": 0.7,
+                    },
+                    "configuration_source_name": "legacy-test",
+                }
+            ),
+            json.dumps(
+                {
+                    "queued_at": "2026-01-01T00:00:00+00:00",
+                    "running_at": None,
+                    "succeeded_at": None,
+                    "failed_at": None,
+                }
+            ),
+            "[]",
+            None,
+            None,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with SQLiteAnalysisRepository(database_path) as repository:
+        record = repository.get("legacy-analysis")
+
+    assert record.cues[0].cue_id == "cue-1"
+    assert record.cues[0].asset_id == cue_asset_id
+    assert record.cues[0].label is None
+    assert record.cues[0].trim_start_seconds is None
+    assert record.cues[0].trim_end_seconds is None
+
+
+def test_cue_asset_reference_rejects_malformed_label_and_trim_bounds_independently_of_rest():
+    """S0003: `CueAssetReference`'s own persisted-value invariants reject
+    malformed non-null values regardless of REST/Pydantic, so a non-HTTP
+    Application caller cannot construct an inconsistent record."""
+
+    with pytest.raises(InvalidAnalysisRecordError):
+        CueAssetReference(cue_id="cue-1", asset_id=_asset_id(), label="  padded  ")
+    with pytest.raises(InvalidAnalysisRecordError):
+        CueAssetReference(cue_id="cue-1", asset_id=_asset_id(), label="")
+    with pytest.raises(InvalidAnalysisRecordError):
+        CueAssetReference(
+            cue_id="cue-1", asset_id=_asset_id(), label="x" * 81
+        )
+    with pytest.raises(InvalidAnalysisRecordError):
+        CueAssetReference(
+            cue_id="cue-1", asset_id=_asset_id(), trim_start_seconds=-1.0
+        )
+    with pytest.raises(InvalidAnalysisRecordError):
+        CueAssetReference(
+            cue_id="cue-1",
+            asset_id=_asset_id(),
+            trim_start_seconds=float("nan"),
+        )
+    with pytest.raises(InvalidAnalysisRecordError):
+        CueAssetReference(
+            cue_id="cue-1",
+            asset_id=_asset_id(),
+            trim_start_seconds=2.0,
+            trim_end_seconds=1.0,
+        )

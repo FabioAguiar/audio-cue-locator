@@ -107,6 +107,7 @@ allowed to propagate unchanged.
 from __future__ import annotations
 
 import io
+import math
 import tempfile
 import wave
 from collections.abc import Sequence
@@ -183,6 +184,13 @@ wiring, exactly like the existing upload/cue-count limits; must be revised
 from representative local measurement once a future, separately authorized
 test-execution phase runs `tests/operational/test_guardrails.py`."""
 
+MAX_CUE_LABEL_CODEPOINTS = 80
+"""S0003: the maximum length of a normalized, non-null Cue `label`, in
+Unicode code points (`len()` on a Python `str` already counts code points,
+not UTF-8 bytes or grapheme clusters). Matches the audited Home design's
+own label-length bound
+(`specs/S0003-cue-labels-and-optional-trim-bounds-contract/spec.md`)."""
+
 DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS = 600.0
 """Explicit, configurable maximum probed duration for a cue Asset,
 independently smaller than `DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS`
@@ -251,15 +259,83 @@ class AssetProcessingTimeoutError(RuntimeError):
     adding a new code (`docs/supported-media-and-limits.md`)."""
 
 
+class InvalidCueRequestError(ValueError):
+    """Raised when a requested Cue's `label` or trim bounds are
+    semantically invalid (S0003): a non-string label, an over-length
+    label, a non-finite/negative trim bound, a reversed `[start, end)`
+    pair, a `trim_start_seconds` not before the Cue's own duration, a
+    `trim_end_seconds` exceeding it, or an effective interval containing
+    no canonical sample. Owned by Application, not Core or Infrastructure
+    (`specs/S0003-cue-labels-and-optional-trim-bounds-contract/spec.md`).
+    Translated to `interfaces.rest_api.errors.ErrorCode.VALIDATION_ERROR`
+    (400) by `interfaces.rest_api.errors`; no new `ErrorCode` is added."""
+
+
 @dataclass(frozen=True)
 class CueRequest:
     """Application's own input shape for one requested cue: a `cue_id`
-    paired with the Asset identifier to resolve. Declared independently of
-    `interfaces.rest_api.schemas.AnalysisCueReference` so this module never
-    depends on Interfaces (`docs/architecture.md`, Principle 2)."""
+    paired with the Asset identifier to resolve, plus S0003's optional,
+    presentation-only `label` and optional Cue-local `trim_start_seconds`/
+    `trim_end_seconds`. Declared independently of `interfaces.rest_api.
+    schemas.AnalysisCueReference` so this module never depends on
+    Interfaces (`docs/architecture.md`, Principle 2).
+
+    `__post_init__` performs every *structural* validation that does not
+    require knowing the Cue's own decoded duration: `label` is trimmed of
+    surrounding whitespace (a blank-after-trim label normalizes to
+    `None`) and bounded to `MAX_CUE_LABEL_CODEPOINTS`; each trim bound, if
+    present, must be a finite, non-negative number, and if both are
+    present, `trim_start_seconds` must be strictly less than
+    `trim_end_seconds`. Duration-aware bounds (`start` before the Cue's
+    own duration, `end` not exceeding it, and the effective interval
+    containing at least one canonical sample) can only be checked once
+    the Cue is decoded, so `CreateAnalysisUseCase` validates those
+    separately."""
 
     cue_id: str
     asset_id: str
+    label: str | None = None
+    trim_start_seconds: float | None = None
+    trim_end_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.label is not None:
+            if not isinstance(self.label, str):
+                raise InvalidCueRequestError("Cue label must be a string or None")
+            normalized_label = self.label.strip() or None
+            if (
+                normalized_label is not None
+                and len(normalized_label) > MAX_CUE_LABEL_CODEPOINTS
+            ):
+                raise InvalidCueRequestError(
+                    "Cue label exceeds the maximum of "
+                    f"{MAX_CUE_LABEL_CODEPOINTS} Unicode code points"
+                )
+            object.__setattr__(self, "label", normalized_label)
+
+        for field_name in ("trim_start_seconds", "trim_end_seconds"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise InvalidCueRequestError(
+                    f"Cue {field_name} must be a finite non-negative number "
+                    "or None"
+                )
+            if not math.isfinite(value):
+                raise InvalidCueRequestError(f"Cue {field_name} must be finite")
+            if value < 0:
+                raise InvalidCueRequestError(f"Cue {field_name} must be >= 0")
+
+        if (
+            self.trim_start_seconds is not None
+            and self.trim_end_seconds is not None
+            and not self.trim_start_seconds < self.trim_end_seconds
+        ):
+            raise InvalidCueRequestError(
+                "Cue trim_start_seconds must be strictly less than "
+                "trim_end_seconds"
+            )
 
 
 ClockFn = Callable[[], datetime]
@@ -353,20 +429,27 @@ def _enforce_duration_limit(
         )
 
 
-def _wav_bytes_to_canonical_array(
+def _decode_and_resample_wav(
     wav_bytes: bytes,
     *,
     max_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
 ) -> np.ndarray:
-    """Decode WAV PCM bytes into a `CANONICAL_AUDIO_SPEC`-conformant
-    (mono, float32, `CANONICAL_AUDIO_SPEC.sample_rate_hz`, peak-normalized)
-    NumPy array, using only the standard-library `wave` module -- no
-    FFmpeg invocation is needed for a WAV input, since `wave` already
-    parses the PCM container directly. `wave`'s own header parse already
-    constitutes real structural probing beyond an extension/declared-type
-    check (M7-02 gap G5: this is accepted as sufficient WAV probing rather
-    than adding a second, ffprobe-based check; see
-    docs/supported-media-and-limits.md)."""
+    """Decode WAV PCM bytes into a mono, float32,
+    `CANONICAL_AUDIO_SPEC.sample_rate_hz` NumPy array, using only the
+    standard-library `wave` module -- no FFmpeg invocation is needed for a
+    WAV input, since `wave` already parses the PCM container directly.
+    `wave`'s own header parse already constitutes real structural probing
+    beyond an extension/declared-type check (M7-02 gap G5: this is
+    accepted as sufficient WAV probing rather than adding a second,
+    ffprobe-based check; see docs/supported-media-and-limits.md).
+
+    Deliberately does **not** apply `CANONICAL_AUDIO_SPEC`'s peak
+    normalization (S0003 ordering requirement: `decode/downmix/resample ->
+    select requested Cue interval -> canonical normalization -> matcher
+    input`): a caller that needs to select a Cue-local sub-interval before
+    normalizing calls this helper directly; `_wav_bytes_to_canonical_array`
+    below is the unchanged, name-stable full pipeline for every caller
+    that does not."""
 
     try:
         with io.BytesIO(wav_bytes) as buffer, wave.open(buffer, "rb") as reader:
@@ -395,6 +478,17 @@ def _wav_bytes_to_canonical_array(
     samples = samples.astype(np.float32)
 
     samples = _resample(samples, frame_rate, CANONICAL_AUDIO_SPEC.sample_rate_hz)
+    return samples.astype(np.float32)
+
+
+def _normalize_canonical_segment(samples: np.ndarray) -> np.ndarray:
+    """Apply `CANONICAL_AUDIO_SPEC`'s peak normalization to an already
+    decoded/downmixed/resampled (and, for a Cue, already interval-selected
+    -- S0003) segment, then reject a non-finite result: the same
+    finiteness guarantee the pre-S0003 single-pass pipeline always
+    provided, now enforced at the one point every canonical segment
+    -- source or effective trimmed Cue -- passes through before reaching
+    the matcher."""
 
     if CANONICAL_AUDIO_SPEC.normalization.enabled and samples.shape[0] > 0:
         peak = float(np.max(np.abs(samples))) if samples.size else 0.0
@@ -406,6 +500,25 @@ def _wav_bytes_to_canonical_array(
             "canonicalized audio contains non-finite samples"
         )
     return samples.astype(np.float32)
+
+
+def _wav_bytes_to_canonical_array(
+    wav_bytes: bytes,
+    *,
+    max_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
+) -> np.ndarray:
+    """Decode WAV PCM bytes into a `CANONICAL_AUDIO_SPEC`-conformant
+    (mono, float32, `CANONICAL_AUDIO_SPEC.sample_rate_hz`, peak-normalized)
+    NumPy array: the unchanged, name-stable full `_decode_and_resample_wav`
+    -> `_normalize_canonical_segment` pipeline, used for source media
+    (never trimmed) and for a Cue when no Cue-local interval selection is
+    needed (`_video_bytes_to_canonical_array` also reaches this for every
+    S0002 video type's extracted WAV bytes)."""
+
+    samples = _decode_and_resample_wav(
+        wav_bytes, max_duration_seconds=max_duration_seconds
+    )
+    return _normalize_canonical_segment(samples)
 
 
 _VIDEO_MEDIA_TYPE_TEMP_SUFFIXES: dict[str, str] = {
@@ -506,6 +619,49 @@ def _mp4_bytes_to_canonical_array(
     )
 
 
+def _select_cue_interval(
+    samples: np.ndarray, cue: CueRequest, cue_duration_seconds: float
+) -> np.ndarray:
+    """Slice an already decoded/downmixed/resampled, not-yet-normalized
+    Cue array (`_decode_and_resample_wav`) to `cue`'s requested half-open
+    `[trim_start_seconds, trim_end_seconds)` interval (S0003), validating
+    the duration-aware bounds that can only be checked once the Cue's own
+    canonical `cue_duration_seconds` is known: `CueRequest.__post_init__`
+    already rejected a non-finite/negative bound or a reversed pair
+    without needing this. An omitted `trim_start_seconds` means `0`; an
+    omitted `trim_end_seconds` means `cue_duration_seconds` (the full Cue).
+    Never touches the source-media array: this function's only caller is
+    `CreateAnalysisUseCase.create`'s per-cue loop."""
+
+    sample_rate = CANONICAL_AUDIO_SPEC.sample_rate_hz
+    start_seconds = (
+        cue.trim_start_seconds if cue.trim_start_seconds is not None else 0.0
+    )
+    if start_seconds >= cue_duration_seconds:
+        raise InvalidCueRequestError(
+            f"cues[{cue.cue_id!r}].trim_start_seconds must be before the "
+            f"Cue's own duration ({cue_duration_seconds:.6f}s)"
+        )
+    if cue.trim_end_seconds is not None and cue.trim_end_seconds > cue_duration_seconds:
+        raise InvalidCueRequestError(
+            f"cues[{cue.cue_id!r}].trim_end_seconds must not exceed the "
+            f"Cue's own duration ({cue_duration_seconds:.6f}s)"
+        )
+    end_seconds = (
+        cue.trim_end_seconds if cue.trim_end_seconds is not None else cue_duration_seconds
+    )
+
+    total_samples = samples.shape[0]
+    start_index = min(max(0, round(start_seconds * sample_rate)), total_samples)
+    end_index = min(max(0, round(end_seconds * sample_rate)), total_samples)
+    if end_index - start_index < 1:
+        raise InvalidCueRequestError(
+            f"cues[{cue.cue_id!r}] effective trim interval must contain at "
+            "least one canonical sample"
+        )
+    return samples[start_index:end_index]
+
+
 class CreateAnalysisUseCase:
     """Application-level asynchronous Analysis creation: validates cue
     count and Asset references, canonicalizes their content, persists a
@@ -585,14 +741,37 @@ class CreateAnalysisUseCase:
             cue_references: list[CueAssetReference] = []
             canonical_cues: dict[str, np.ndarray] = {}
             for cue in cues:
-                canonical_cues[cue.cue_id] = self._resolve_and_canonicalize(
+                # S0003: the cue-media duration guardrail
+                # (`max_cue_media_duration_seconds`) still runs first,
+                # inside `_resolve_and_canonicalize`'s decode step -- a
+                # requested trim can never bypass it. `normalize=False`
+                # defers peak normalization until after the requested
+                # interval is selected below, so an out-of-interval sample
+                # never influences the effective segment's own peak.
+                raw_cue_samples = self._resolve_and_canonicalize(
                     cue.asset_id,
                     allowed_media_types=CUE_SUPPORTED_MEDIA_TYPES,
                     role=f"cues[{cue.cue_id!r}].asset_id",
                     max_duration_seconds=self._max_cue_media_duration_seconds,
+                    normalize=False,
+                )
+                cue_duration_seconds = (
+                    raw_cue_samples.shape[0] / CANONICAL_AUDIO_SPEC.sample_rate_hz
+                )
+                effective_samples = _select_cue_interval(
+                    raw_cue_samples, cue, cue_duration_seconds
+                )
+                canonical_cues[cue.cue_id] = _normalize_canonical_segment(
+                    effective_samples
                 )
                 cue_references.append(
-                    CueAssetReference(cue_id=cue.cue_id, asset_id=cue.asset_id)
+                    CueAssetReference(
+                        cue_id=cue.cue_id,
+                        asset_id=cue.asset_id,
+                        label=cue.label,
+                        trim_start_seconds=cue.trim_start_seconds,
+                        trim_end_seconds=cue.trim_end_seconds,
+                    )
                 )
         except Exception as exc:
             # M7-04: application/media-processing boundary diagnostic.
@@ -633,13 +812,25 @@ class CreateAnalysisUseCase:
         allowed_media_types: frozenset[str],
         role: str,
         max_duration_seconds: float,
+        normalize: bool = True,
     ) -> np.ndarray:
         """Read `asset_id` (raising `AssetNotFoundError`/
         `InvalidAssetIdentifierError` unchanged if it does not exist or is
         malformed -- both already mapped by `interfaces.rest_api.errors`),
         confirm its detected content matches `allowed_media_types` for
         `role`, enforce `max_duration_seconds` (M7-02 acceptance criterion
-        1), and return its `CANONICAL_AUDIO_SPEC`-conformant array."""
+        1), and return its canonical array.
+
+        `normalize=False` (S0003) returns the decoded/downmixed/resampled
+        array *before* peak normalization, so a caller that still needs to
+        select a Cue-local sub-interval can do so before normalizing.
+        Every referenced Asset reaching the video branch below is a
+        `source_asset_id` (a Cue's own `allowed_media_types` is always
+        `{"audio/wav"}"`, `application.asset_ingestion.
+        CUE_SUPPORTED_MEDIA_TYPES`), so `normalize=False` for that branch
+        never actually arises in practice; it is honored for a WAV input
+        either way and simply has no effect on the always-normalized video
+        path."""
 
         content = self._asset_storage.read(asset_id)
         detected_media_type = sniff_media_type(content)
@@ -650,7 +841,10 @@ class CreateAnalysisUseCase:
                 f"of {sorted(allowed_media_types)!r})"
             )
         if detected_media_type == "audio/wav":
-            return _wav_bytes_to_canonical_array(content, max_duration_seconds=max_duration_seconds)
+            samples = _decode_and_resample_wav(
+                content, max_duration_seconds=max_duration_seconds
+            )
+            return _normalize_canonical_segment(samples) if normalize else samples
         return _video_bytes_to_canonical_array(
             content,
             detected_media_type,

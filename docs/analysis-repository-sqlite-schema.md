@@ -44,7 +44,7 @@ identifiers this repository stores as text
 | `analysis_id` | Non-empty, caller-supplied stable identifier for the Analysis. |
 | `state` | `AnalysisLifecycleState` (`core.analysis_lifecycle`, M4-01): `queued`, `running`, `succeeded`, or `failed`. |
 | `source_asset_id` | M4-02 canonical Asset identifier for the already-canonicalized source audio; validated, never a filesystem path. |
-| `cues` | Non-empty tuple of `CueAssetReference(cue_id, asset_id)`, each `asset_id` an M4-02 Asset identifier; `cue_id` values are unique within the record. |
+| `cues` | Non-empty tuple of `CueAssetReference(cue_id, asset_id, label, trim_start_seconds, trim_end_seconds)`, each `asset_id` an M4-02 Asset identifier; `cue_id` values are unique within the record. `label`/`trim_start_seconds`/`trim_end_seconds` are S0003's additive, nullable presentation/processing metadata (see "Cue label and trim bounds (S0003)" below); they carry no media bytes, influence no matching/scoring/occurrence-selection decision, and default to `None` for a record built before S0003. |
 | `effective_configuration` | An `EffectiveConfigurationSnapshot` (`core.analysis_result`, M3-02), reused unchanged. |
 | `lifecycle_timestamps` | A `LifecycleTimestamps` value: one optional, timezone-aware `datetime` per `AnalysisLifecycleState` member, present for every state actually reached so far. |
 | `result_reference` | Optional opaque string pointing at an externally serialized `AnalysisResult` (M3-06); this repository never stores or interprets the Result body itself. |
@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS analyses (
 | `analysis_id` | Verbatim `AnalysisRecord.analysis_id` string; primary key. |
 | `state` | The `AnalysisLifecycleState` string value (`"queued"`, `"running"`, `"succeeded"`, `"failed"`). |
 | `source_asset_id` | Verbatim M4-02 Asset identifier string. |
-| `cues_json` | JSON array of `{"cue_id": ..., "asset_id": ...}` objects, in the record's original cue order. |
+| `cues_json` | JSON array of `{"cue_id": ..., "asset_id": ..., "label": ..., "trim_start_seconds": ..., "trim_end_seconds": ...}` objects, in the record's original cue order. The last three (S0003) are nullable and additive; see "Cue label and trim bounds (S0003)" below. |
 | `effective_configuration_json` | JSON object mirroring `EffectiveConfigurationSnapshot`'s field structure (`canonicalization`, `matching`, `configuration_source_name`). |
 | `lifecycle_timestamps_json` | JSON object with one key per lifecycle state (`queued_at`, `running_at`, `succeeded_at`, `failed_at`), each a timezone-aware ISO-8601 string or `null`. |
 | `owned_asset_ids_json` | JSON array of additional M4-02 Asset identifier strings, in insertion order. An empty array means no additional persisted ownership links. |
@@ -141,6 +141,27 @@ additional owned Assets, while new and updated rows round-trip explicit
 ownership. There is still no separate migration runner or schema-version
 column; a future incompatible change is expected to introduce explicit
 versioning rather than silently altering the contract.
+
+### Cue label and trim bounds (S0003)
+
+`cues_json` gains three additive, nullable members per Cue entry --
+`label`, `trim_start_seconds`, `trim_end_seconds` -- with **no SQLite
+column or table-schema migration**: `cues_json` itself remains the sole
+persistence owner of every Cue-level field, exactly as it already was for
+`cue_id`/`asset_id`. `_serialize_cues` always writes all five keys (the
+last three as JSON `null` when absent); `_deserialize_cues` reads each of
+the three new keys with `dict.get`, so a `cues_json` entry written before
+S0003 -- containing only `cue_id`/`asset_id` -- deserializes with `label`,
+`trim_start_seconds`, and `trim_end_seconds` all `None`, identically to an
+entry that explicitly stored `null` for them. `CueAssetReference`'s own
+`__post_init__` still enforces every persisted-value invariant for a
+non-null value (a normalized, <= 80-code-point `label`; a finite,
+non-negative trim bound; `trim_start_seconds < trim_end_seconds` when both
+are present) independently of `interfaces.rest_api.schemas`/Pydantic, so a
+non-HTTP Application caller cannot persist an inconsistent record through
+this adapter either. These three fields carry no media bytes, canonical
+sample arrays, filenames, or filesystem paths, and never influence
+matching, acceptance, score, occurrence selection, or source position.
 
 ## Transaction and concurrency behavior
 

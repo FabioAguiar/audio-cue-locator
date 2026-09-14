@@ -142,7 +142,14 @@ def _create_analysis(
     (mirroring `asset_routes._handle_upload`)."""
 
     cue_requests = [
-        CueRequest(cue_id=cue.cue_id, asset_id=cue.asset_id) for cue in payload.cues
+        CueRequest(
+            cue_id=cue.cue_id,
+            asset_id=cue.asset_id,
+            label=cue.label,
+            trim_start_seconds=cue.trim_start_seconds,
+            trim_end_seconds=cue.trim_end_seconds,
+        )
+        for cue in payload.cues
     ]
     try:
         record = use_case.create(source_asset_id=payload.source_asset_id, cues=cue_requests)

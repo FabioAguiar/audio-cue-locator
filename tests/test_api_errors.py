@@ -22,6 +22,7 @@ import json
 import pytest
 from fastapi.exceptions import RequestValidationError
 
+from audio_cue_locator.application.create_analysis import InvalidCueRequestError
 from audio_cue_locator.application.multi_cue_orchestration import (
     AnalysisSourceInputError,
 )
@@ -78,6 +79,13 @@ MAPPED_EXCEPTIONS = [
     (InvalidAssetMetadataError("bad metadata"), ErrorCode.VALIDATION_ERROR, 400),
     (InvalidAnalysisRecordError("bad record"), ErrorCode.VALIDATION_ERROR, 400),
     (AnalysisSourceInputError("bad source"), ErrorCode.VALIDATION_ERROR, 400),
+    (
+        InvalidCueRequestError(
+            "cue label contains the secret value s3cr3t-cue-label"
+        ),
+        ErrorCode.VALIDATION_ERROR,
+        400,
+    ),
     (UnsupportedMediaError("bad media"), ErrorCode.UNSUPPORTED_MEDIA, 415),
     (
         ResourceLimitExceededError("too many cues"),

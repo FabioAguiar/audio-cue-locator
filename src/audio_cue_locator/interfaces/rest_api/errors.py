@@ -61,6 +61,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from audio_cue_locator.application.create_analysis import InvalidCueRequestError
 from audio_cue_locator.application.multi_cue_orchestration import (
     AnalysisSourceInputError,
 )
@@ -132,6 +133,7 @@ _EXCEPTION_STATUS_MAP: tuple[tuple[type[Exception], ErrorCode, int], ...] = (
     (InvalidAssetMetadataError, ErrorCode.VALIDATION_ERROR, status.HTTP_400_BAD_REQUEST),
     (InvalidAnalysisRecordError, ErrorCode.VALIDATION_ERROR, status.HTTP_400_BAD_REQUEST),
     (AnalysisSourceInputError, ErrorCode.VALIDATION_ERROR, status.HTTP_400_BAD_REQUEST),
+    (InvalidCueRequestError, ErrorCode.VALIDATION_ERROR, status.HTTP_400_BAD_REQUEST),
     (UnsupportedMediaError, ErrorCode.UNSUPPORTED_MEDIA, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE),
     (
         ResourceLimitExceededError,

@@ -154,13 +154,34 @@ _SELECT_COLUMNS = (
 
 def _serialize_cues(cues: tuple[CueAssetReference, ...]) -> str:
     return json.dumps(
-        [{"cue_id": cue.cue_id, "asset_id": cue.asset_id} for cue in cues]
+        [
+            {
+                "cue_id": cue.cue_id,
+                "asset_id": cue.asset_id,
+                "label": cue.label,
+                "trim_start_seconds": cue.trim_start_seconds,
+                "trim_end_seconds": cue.trim_end_seconds,
+            }
+            for cue in cues
+        ]
     )
 
 
 def _deserialize_cues(text: str) -> tuple[CueAssetReference, ...]:
+    # S0003: `label`/`trim_start_seconds`/`trim_end_seconds` are additive
+    # `cues_json` members. `dict.get` returns `None` for a legacy entry
+    # that predates S0003 (only `cue_id`/`asset_id`) exactly as it does
+    # for a current entry that explicitly stored `null` -- no SQLite
+    # column or migration is added for these fields (`cues_json` remains
+    # the persistence owner).
     return tuple(
-        CueAssetReference(cue_id=entry["cue_id"], asset_id=entry["asset_id"])
+        CueAssetReference(
+            cue_id=entry["cue_id"],
+            asset_id=entry["asset_id"],
+            label=entry.get("label"),
+            trim_start_seconds=entry.get("trim_start_seconds"),
+            trim_end_seconds=entry.get("trim_end_seconds"),
+        )
         for entry in json.loads(text)
     )
 

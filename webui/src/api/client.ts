@@ -38,9 +38,18 @@ export interface AssetPublic {
 
 export type AnalysisStatus = "queued" | "running" | "succeeded" | "failed";
 
+/** S0003 adds `label` (optional, presentation-only) and
+ * `trim_start_seconds`/`trim_end_seconds` (optional Cue-local processing
+ * bounds, half-open `[start, end)`, in seconds). This type change only
+ * — no S0003 WebUI redesign is performed here; `NewAnalysisPage.tsx`
+ * still sends/reads only `cue_id`/`asset_id`, which remains valid since
+ * every new field is optional. */
 export interface AnalysisCueReference {
   cue_id: string;
   asset_id: string;
+  label?: string | null;
+  trim_start_seconds?: number | null;
+  trim_end_seconds?: number | null;
 }
 
 export interface AnalysisLifecycleTimestamps {

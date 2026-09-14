@@ -160,10 +160,25 @@ class AnalysisStatus(str, Enum):
 
 class AnalysisCueReference(_ForbidExtraModel):
     """Public projection of one
-    `application.ports.analysis_repository.CueAssetReference`."""
+    `application.ports.analysis_repository.CueAssetReference`.
+
+    S0003 adds `label` (optional, presentation-only; normalization --
+    surrounding-whitespace trim, blank-after-trim to `None`, the 80-code-
+    point maximum -- is Application-owned, not enforced here) and
+    `trim_start_seconds`/`trim_end_seconds` (optional Cue-local processing
+    bounds). Pydantic rejects only the obvious request-shape violations a
+    non-numeric or negative trim value would be; cross-field ordering
+    (`start < end`) and every duration-aware bound remain
+    `application.create_analysis`'s responsibility, since only Application
+    ever decodes the referenced Cue media. Existing clients supplying only
+    `cue_id`/`asset_id` are unaffected: every new field defaults to
+    `None`."""
 
     cue_id: str = Field(..., min_length=1)
     asset_id: str
+    label: str | None = None
+    trim_start_seconds: float | None = Field(default=None, ge=0)
+    trim_end_seconds: float | None = Field(default=None, ge=0)
 
 
 class AnalysisCreateRequest(_ForbidExtraModel):
@@ -284,7 +299,13 @@ def analysis_record_to_public(record: AnalysisRecord) -> AnalysisPublic:
     """
 
     def _cue_to_public(cue: CueAssetReference) -> AnalysisCueReference:
-        return AnalysisCueReference(cue_id=cue.cue_id, asset_id=cue.asset_id)
+        return AnalysisCueReference(
+            cue_id=cue.cue_id,
+            asset_id=cue.asset_id,
+            label=cue.label,
+            trim_start_seconds=cue.trim_start_seconds,
+            trim_end_seconds=cue.trim_end_seconds,
+        )
 
     structured_error = None
     if record.structured_error is not None:

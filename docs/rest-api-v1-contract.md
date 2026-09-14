@@ -219,10 +219,48 @@ Public representation of
 | `analysis_id` | yes | string | Caller/repository-stable identifier. |
 | `status` | yes | `AnalysisStatus` enum | `queued`, `running`, `succeeded`, or `failed`, mirroring `core.analysis_lifecycle.AnalysisLifecycleState`. |
 | `source_asset_id` | yes | string | Asset identifier of the shared source media. |
-| `cues` | yes | list of `AnalysisCueReference` (>= 1) | Each `{cue_id, asset_id}`. |
+| `cues` | yes | list of `AnalysisCueReference` (>= 1) | Each `{cue_id, asset_id, label, trim_start_seconds, trim_end_seconds}` (S0003 adds the last three, all optional/nullable). |
 | `lifecycle_timestamps` | yes | `AnalysisLifecycleTimestamps` | `queued_at` required; `running_at`/`succeeded_at`/`failed_at` optional and timezone-aware. |
 | `result_reference` | no | string or null | Opaque pointer to an externally serialized Result; never the Result body itself. |
 | `structured_error` | no | `AnalysisStructuredError` or null | Present if, and only if, `status` is `failed`. |
+
+### Cue label and optional cue-local trim bounds (S0003)
+
+`AnalysisCueReference` is additive: existing clients that send only
+`{cue_id, asset_id}` continue to work unchanged, and both `POST
+/api/v1/analyses` and every Analysis create/status response accept/expose
+three further optional fields per Cue:
+
+| Field | Required | Type | Notes |
+|---|---:|---|---|
+| `label` | no | string or null | Presentation-only. Surrounding whitespace is trimmed before persistence; a blank-after-trim label normalizes to `null`. At most 80 Unicode code points after normalization. Never influences matching, acceptance, score, occurrence selection, or source position; never used as `cue_id`, and duplicate labels across different cues are allowed. |
+| `trim_start_seconds` | no | number (>= 0) or null | Cue-local processing bound, in seconds, on the Cue's **own** media timeline -- never a source-media search-window bound. Omitted means `0`. |
+| `trim_end_seconds` | no | number (>= 0) or null | Cue-local processing bound, in seconds. Omitted means the full canonical Cue duration. |
+
+The effective Cue interval is the half-open range `[trim_start_seconds,
+trim_end_seconds)`, applied to the Cue's own already-canonicalized media
+before it is submitted to the existing matcher: `decode/downmix/resample
+-> select requested Cue interval -> canonical peak normalization ->
+matcher input`. The source array is never sliced or search-window
+constrained by these fields, and `Occurrence.temporal_position` remains
+measured from source-media time origin `0` exactly as before -- Result v1
+(`analysis_result.v1`) is unchanged by S0003 and stays keyed only by
+`cue_id`.
+
+Pydantic rejects only the obvious request-shape violations a non-numeric
+or negative trim value would be (422 `validation_error`). Every
+duration-aware and cross-field semantic -- `trim_start_seconds <
+trim_end_seconds` when both are present, `trim_start_seconds` before the
+Cue's own canonical duration, `trim_end_seconds` not exceeding it, and the
+effective interval containing at least one canonical sample -- is
+Application-owned (`application.create_analysis`, since only Application
+ever decodes the referenced Cue media) and is enforced before Analysis
+persistence or executor submission, using the existing `validation_error`
+`ErrorCode` at 400 (`application.create_analysis.InvalidCueRequestError`,
+translated by `interfaces.rest_api.errors`); no new `ErrorCode` is added.
+A request's Cue-media duration guardrail (the existing 10-minute Cue
+limit) is still enforced against the **full uploaded** Cue media before
+any trim is applied -- a requested subsegment can never bypass it.
 
 `owned_asset_ids` (`AnalysisRecord`'s retention/cleanup bookkeeping field,
 `docs/asset-identity-and-storage.md`) is intentionally not part of the

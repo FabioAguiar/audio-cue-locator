@@ -491,3 +491,152 @@ def test_controlled_matching_failure_is_persisted_and_exposed_safely_over_http(
         _run(_scenario())
     finally:
         _shutdown(executors)
+
+
+# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+
+
+def test_cue_local_trim_selects_interior_target_and_preserves_source_absolute_timeline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A real end-to-end HTTP flow: the source WAV contains a known target
+    at a known absolute sample offset; the Cue WAV carries leading and
+    trailing material (values the target does not share) around an
+    interior copy of that same target. The request's
+    `trim_start_seconds`/`trim_end_seconds` select exactly the interior
+    target segment. The Analysis must still succeed, the occurrence must
+    remain on the source-media absolute timeline (unaffected by the Cue's
+    own trim), and the create/status response must echo the requested
+    optional Cue fields back."""
+
+    case = _manifest_case("found_offset_near_start")
+    target = case["cue"]  # [0.7, -0.5, 0.2, -0.8, 0.4, 0.1]
+    filler = [0.9, -0.9, 0.9, -0.9]
+    cue_samples = filler + target + filler
+    trim_start_seconds = len(filler) / 48_000
+    trim_end_seconds = (len(filler) + len(target)) / 48_000
+
+    app, executors = _build_test_app(monkeypatch, tmp_path, "cue-trim")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(case["source"]),
+                filename="source.wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(cue_samples),
+                filename="cue.wav",
+            )
+
+            created = await client.post(
+                "/api/v1/analyses",
+                json={
+                    "source_asset_id": source["identifier"],
+                    "cues": [
+                        {
+                            "cue_id": "cue-1",
+                            "asset_id": cue["identifier"],
+                            "label": "  Target hit  ",
+                            "trim_start_seconds": trim_start_seconds,
+                            "trim_end_seconds": trim_end_seconds,
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 202, created.text
+            created_payload = created.json()
+            assert created_payload["cues"][0]["label"] == "Target hit"
+            assert created_payload["cues"][0]["trim_start_seconds"] == pytest.approx(
+                trim_start_seconds
+            )
+            assert created_payload["cues"][0]["trim_end_seconds"] == pytest.approx(
+                trim_end_seconds
+            )
+            location = created.headers["location"]
+
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+            assert terminal["cues"][0]["label"] == "Target hit"
+            assert terminal["cues"][0]["trim_start_seconds"] == pytest.approx(
+                trim_start_seconds
+            )
+            assert terminal["cues"][0]["trim_end_seconds"] == pytest.approx(
+                trim_end_seconds
+            )
+
+            result_response = await client.get(f"{location}/result")
+            assert result_response.status_code == 200, result_response.text
+            outcome = result_response.json()["result"]["cues"][0]["outcome"]
+            assert outcome["kind"] == "occurrences"
+            occurrence = outcome["occurrences"][0]
+            # cue_start_sample=12 at the fixture's 48 kHz canonical rate:
+            # the occurrence stays on the source-media absolute timeline,
+            # measured from source origin 0, exactly as before S0003 --
+            # never shifted or reinterpreted by the Cue's own trim bounds.
+            assert occurrence["temporal_position"] == pytest.approx(
+                case["cue_start_sample"] / 48_000, abs=1e-4
+            )
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
+def test_duration_aware_invalid_trim_interval_returns_sanitized_error_and_persists_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    case = _manifest_case("found_offset_near_start")
+    app, executors = _build_test_app(monkeypatch, tmp_path, "cue-trim-invalid")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(case["source"]),
+                filename="source.wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(case["cue"]),
+                filename="cue.wav",
+            )
+
+            # The cue is `len(case["cue"]) / 48000` seconds long;
+            # requesting a start at-or-after that duration is a
+            # duration-aware semantic violation only Application can
+            # detect (it requires decoding the Cue), not a request-shape
+            # one Pydantic could catch.
+            cue_duration_seconds = len(case["cue"]) / 48_000
+            rejected = await client.post(
+                "/api/v1/analyses",
+                json={
+                    "source_asset_id": source["identifier"],
+                    "cues": [
+                        {
+                            "cue_id": "cue-1",
+                            "asset_id": cue["identifier"],
+                            "trim_start_seconds": cue_duration_seconds,
+                        }
+                    ],
+                },
+            )
+            _assert_error(rejected, 400, "validation_error")
+
+    try:
+        _run(_scenario())
+    finally:
+        for executor in executors:
+            assert executor._repository.list_by_state(
+                importlib.import_module(
+                    "audio_cue_locator.core.analysis_lifecycle"
+                ).AnalysisLifecycleState.QUEUED
+            ) == ()
+        _shutdown(executors)

@@ -81,6 +81,7 @@ def _record(
     *,
     analysis_id: str = "analysis-1",
     result_reference: str | None = None,
+    cues: tuple[CueAssetReference, ...] | None = None,
 ) -> AnalysisRecord:
     timestamps = LifecycleTimestamps(
         queued_at=NOW,
@@ -98,7 +99,7 @@ def _record(
         analysis_id=analysis_id,
         state=state,
         source_asset_id=SOURCE_ASSET_ID,
-        cues=(CueAssetReference(cue_id="cue-1", asset_id=CUE_ASSET_ID),),
+        cues=cues or (CueAssetReference(cue_id="cue-1", asset_id=CUE_ASSET_ID),),
         effective_configuration=_configuration(),
         lifecycle_timestamps=timestamps,
         result_reference=result_reference,
@@ -330,3 +331,47 @@ def test_route_module_has_no_direct_infrastructure_or_storage_imports():
     )
     assert "sqlite3" not in imported_modules
     assert "pathlib" not in imported_modules
+
+
+# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+
+
+@pytest.mark.parametrize("state", list(AnalysisLifecycleState))
+def test_public_status_preserves_cue_label_and_trim_fields_across_every_state(state):
+    cue = CueAssetReference(
+        cue_id="cue-1",
+        asset_id=CUE_ASSET_ID,
+        label="Drop hit",
+        trim_start_seconds=0.5,
+        trim_end_seconds=1.5,
+    )
+    record = _record(
+        state,
+        cues=(cue,),
+        result_reference="result:1" if state is AnalysisLifecycleState.SUCCEEDED else None,
+    )
+    use_case = QueryAnalysisUseCase(_Repository([record]), _ResultReader({}))
+
+    public = _get_analysis_status(record.analysis_id, use_case)
+
+    assert public.cues[0].label == "Drop hit"
+    assert public.cues[0].trim_start_seconds == 0.5
+    assert public.cues[0].trim_end_seconds == 1.5
+
+
+def test_public_status_serializes_absent_cue_label_and_trim_fields_as_null():
+    record = _record(
+        AnalysisLifecycleState.QUEUED,
+        cues=(CueAssetReference(cue_id="cue-1", asset_id=CUE_ASSET_ID),),
+    )
+    use_case = QueryAnalysisUseCase(_Repository([record]), _ResultReader({}))
+
+    public = _get_analysis_status(record.analysis_id, use_case)
+
+    assert public.cues[0].label is None
+    assert public.cues[0].trim_start_seconds is None
+    assert public.cues[0].trim_end_seconds is None
+    dumped = json.loads(public.model_dump_json())
+    assert dumped["cues"][0]["label"] is None
+    assert dumped["cues"][0]["trim_start_seconds"] is None
+    assert dumped["cues"][0]["trim_end_seconds"] is None

@@ -152,6 +152,64 @@ def test_generated_components_preserve_public_schema_fields_and_enums():
     assert asset["checksum_algorithm"]["const"] == "sha256"
 
 
+def test_generated_cue_reference_schema_exposes_the_three_additive_s0003_fields():
+    """S0003 adds `label`, `trim_start_seconds`, and `trim_end_seconds` to
+    `AnalysisCueReference`, all optional/nullable, alongside the two
+    already-required fields; the numeric bounds are non-negative, matching
+    the obvious request-shape violations Pydantic itself rejects (a
+    cross-field/duration-aware bound stays Application-owned and is not
+    representable in JSON Schema)."""
+
+    components = app_module.create_app().openapi()["components"]["schemas"]
+    cue_reference = components["AnalysisCueReference"]
+
+    assert set(cue_reference["required"]) == {"cue_id", "asset_id"}
+    properties = cue_reference["properties"]
+    for field_name in ("label", "trim_start_seconds", "trim_end_seconds"):
+        assert field_name in properties
+
+    for field_name in ("trim_start_seconds", "trim_end_seconds"):
+        # A nullable numeric field is generated as `anyOf: [{type, ...},
+        # {type: "null"}]` rather than a bare `type`.
+        numeric_branch = next(
+            branch
+            for branch in properties[field_name]["anyOf"]
+            if branch.get("type") == "number"
+        )
+        assert numeric_branch["minimum"] == 0
+        null_branch = next(
+            branch for branch in properties[field_name]["anyOf"] if branch.get("type") == "null"
+        )
+        assert null_branch == {"type": "null"}
+
+    label_branch_types = {
+        branch.get("type") for branch in properties["label"]["anyOf"]
+    }
+    assert label_branch_types == {"string", "null"}
+
+
+def test_generated_openapi_error_and_route_surface_is_unchanged_by_s0003():
+    """S0003 adds no new `ErrorCode`, route, or status: the closed v1
+    operation matrix and error-code catalog stay exactly as documented."""
+
+    document = app_module.create_app().openapi()
+    components = document["components"]["schemas"]
+
+    assert set(components["ErrorCode"]["enum"]) == {
+        "validation_error",
+        "unsupported_media",
+        "resource_limit_exceeded",
+        "resource_not_found",
+        "lifecycle_conflict",
+        "result_not_ready",
+        "analysis_failed",
+        "internal_error",
+    }
+    assert set(document["paths"]) == {
+        path for path, _ in OPERATION_MATRIX
+    }
+
+
 def test_generated_result_envelope_keeps_api_and_result_versions_independent():
     envelope = app_module.create_app().openapi()["components"]["schemas"][
         "AnalysisResultEnvelope"

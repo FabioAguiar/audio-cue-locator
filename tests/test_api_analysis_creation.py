@@ -30,18 +30,24 @@ import io
 import struct
 import time
 import wave
+from concurrent.futures import Future
 from pathlib import Path
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 from starlette.responses import Response
 
 from audio_cue_locator.application.asset_ingestion import sniff_media_type
 from audio_cue_locator.application.create_analysis import (
+    MAX_CUE_LABEL_CODEPOINTS,
     AssetCanonicalizationError,
     AssetContentIncompatibleError,
     CueRequest,
+    InvalidCueRequestError,
     TooManyCuesError,
+    _decode_and_resample_wav,
+    _normalize_canonical_segment,
     _wav_bytes_to_canonical_array,
 )
 from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
@@ -458,5 +464,376 @@ def test_video_source_ffmpeg_timeout_is_translated_and_rejected_before_persisten
 
     payload = _payload(source_asset.identifier, cue_asset_id)
     with pytest.raises(UnsupportedMediaError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+
+CUE_SEGMENT_SAMPLE_COUNT = 4800
+"""0.1s at `CANONICAL_AUDIO_SPEC.sample_rate_hz` (48000 Hz) exactly, so the
+S0003 tests below need no resampling-rounding tolerance: a WAV built at
+this sample rate passes through `_resample` as a no-op."""
+
+
+def _make_three_segment_cue_wav_bytes() -> bytes:
+    """0.3s of 48 kHz mono PCM16 built from three 0.1s blocks: loud
+    (amplitude 32000), quiet (amplitude 8000), loud (32000) again. The
+    quiet middle block is the interior segment a start+end trim test below
+    selects; its own raw peak is far below the two outer blocks', which is
+    exactly what lets a test distinguish "normalized using the effective
+    trimmed segment's own peak" (S0003 ordering) from "normalized using
+    the whole Cue's peak" (pre-S0003 behavior applied to a sub-interval,
+    which S0003 forbids)."""
+
+    samples = (
+        [32000] * CUE_SEGMENT_SAMPLE_COUNT
+        + [8000] * CUE_SEGMENT_SAMPLE_COUNT
+        + [32000] * CUE_SEGMENT_SAMPLE_COUNT
+    )
+    return _make_wav_bytes(
+        sample_rate=CANONICAL_AUDIO_SPEC.sample_rate_hz, channels=1, samples=samples
+    )
+
+
+def _ingest_cue_bytes(use_case, content: bytes, *, name: str = "cue.wav") -> str:
+    asset = use_case._asset_storage.ingest(
+        content,
+        logical_type=AssetType.CUE,
+        informative_name=name,
+        detected_media_type="audio/wav",
+    )
+    return asset.identifier
+
+
+def _capture_submitted_arrays(use_case) -> list[tuple[str, np.ndarray, dict[str, np.ndarray]]]:
+    """Replace `use_case._executor.submit` with a stub that records the
+    exact `(analysis_id, canonical_source, canonical_cues)` arguments
+    `CreateAnalysisUseCase.create` passes it, without running any real
+    matching -- the S0003 canonicalization/trim pipeline runs entirely
+    before this call, so no asynchronous wait is needed to observe its
+    result. Returns the list `submit` appends each call's arguments to."""
+
+    calls: list[tuple[str, np.ndarray, dict[str, np.ndarray]]] = []
+
+    def _fake_submit(analysis_id, canonical_source, canonical_cues):
+        calls.append((analysis_id, canonical_source, canonical_cues))
+        future: Future = Future()
+        future.set_result(None)
+        return future
+
+    use_case._executor.submit = _fake_submit
+    return calls
+
+
+def test_no_optional_cue_fields_preserves_pre_s0003_full_cue_behavior(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[AnalysisCueReference(cue_id="cue-1", asset_id=cue_id)],
+    )
+    public = _create_analysis(payload, Response(), use_case)
+
+    assert public.cues[0].label is None
+    assert public.cues[0].trim_start_seconds is None
+    assert public.cues[0].trim_end_seconds is None
+    canonical_cues = calls[0][2]
+    assert np.array_equal(
+        canonical_cues["cue-1"], _wav_bytes_to_canonical_array(cue_bytes)
+    )
+
+
+def test_label_is_normalized_and_persisted_without_changing_canonical_samples(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(cue_id="cue-1", asset_id=cue_id, label="  My Cue  ")
+        ],
+    )
+    public = _create_analysis(payload, Response(), use_case)
+
+    assert public.cues[0].label == "My Cue"
+    canonical_cues = calls[0][2]
+    assert np.array_equal(
+        canonical_cues["cue-1"], _wav_bytes_to_canonical_array(cue_bytes)
+    )
+
+
+def test_blank_after_trim_label_normalizes_to_none(
+    use_case, source_asset_id, cue_asset_id
+):
+    _capture_submitted_arrays(use_case)
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(cue_id="cue-1", asset_id=cue_asset_id, label="   ")
+        ],
+    )
+    public = _create_analysis(payload, Response(), use_case)
+
+    assert public.cues[0].label is None
+
+
+def test_start_only_trim_selects_from_start_to_cue_duration(use_case, source_asset_id):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1", asset_id=cue_id, trim_start_seconds=0.1
+            )
+        ],
+    )
+    public = _create_analysis(payload, Response(), use_case)
+
+    assert public.cues[0].trim_start_seconds == 0.1
+    assert public.cues[0].trim_end_seconds is None
+    full_raw = _decode_and_resample_wav(cue_bytes)
+    expected = _normalize_canonical_segment(full_raw[CUE_SEGMENT_SAMPLE_COUNT:])
+    canonical_cues = calls[0][2]
+    assert canonical_cues["cue-1"].shape[0] == 2 * CUE_SEGMENT_SAMPLE_COUNT
+    assert np.array_equal(canonical_cues["cue-1"], expected)
+
+
+def test_end_only_trim_selects_from_zero_to_end(use_case, source_asset_id):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1", asset_id=cue_id, trim_end_seconds=0.2
+            )
+        ],
+    )
+    public = _create_analysis(payload, Response(), use_case)
+
+    assert public.cues[0].trim_start_seconds is None
+    assert public.cues[0].trim_end_seconds == 0.2
+    full_raw = _decode_and_resample_wav(cue_bytes)
+    expected = _normalize_canonical_segment(full_raw[: 2 * CUE_SEGMENT_SAMPLE_COUNT])
+    canonical_cues = calls[0][2]
+    assert canonical_cues["cue-1"].shape[0] == 2 * CUE_SEGMENT_SAMPLE_COUNT
+    assert np.array_equal(canonical_cues["cue-1"], expected)
+
+
+def test_start_and_end_trim_selects_interior_segment_and_normalizes_after_trim(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1",
+                asset_id=cue_id,
+                trim_start_seconds=0.1,
+                trim_end_seconds=0.2,
+            )
+        ],
+    )
+    public = _create_analysis(payload, Response(), use_case)
+
+    assert public.cues[0].trim_start_seconds == 0.1
+    assert public.cues[0].trim_end_seconds == 0.2
+    effective = calls[0][2]["cue-1"]
+    assert effective.shape[0] == CUE_SEGMENT_SAMPLE_COUNT
+    # The interior (quiet) block's own raw peak (8000/32768) is scaled to
+    # exactly the canonical target amplitude (1.0): had normalization
+    # instead used the *whole* Cue's peak (the louder outer blocks,
+    # 32000/32768), this segment would only reach 8000/32000 = 0.25 --
+    # proving trim happens before normalization (S0003 ordering), not
+    # after.
+    assert np.allclose(effective, 1.0, atol=1e-5)
+
+
+def test_trimmed_cue_reaches_executor_under_its_own_cue_id(use_case, source_asset_id):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id_a = _ingest_cue_bytes(use_case, cue_bytes, name="cue-a.wav")
+    cue_id_b = _ingest_cue_bytes(use_case, cue_bytes, name="cue-b.wav")
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="alpha",
+                asset_id=cue_id_a,
+                trim_start_seconds=0.1,
+                trim_end_seconds=0.2,
+            ),
+            AnalysisCueReference(cue_id="beta", asset_id=cue_id_b),
+        ],
+    )
+    _create_analysis(payload, Response(), use_case)
+
+    canonical_cues = calls[0][2]
+    assert set(canonical_cues) == {"alpha", "beta"}
+    assert canonical_cues["alpha"].shape[0] == CUE_SEGMENT_SAMPLE_COUNT
+    assert canonical_cues["beta"].shape[0] == 3 * CUE_SEGMENT_SAMPLE_COUNT
+
+
+def test_source_array_is_never_sliced_by_per_cue_trim_bounds(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    calls = _capture_submitted_arrays(use_case)
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1",
+                asset_id=cue_id,
+                trim_start_seconds=0.1,
+                trim_end_seconds=0.2,
+            )
+        ],
+    )
+    _create_analysis(payload, Response(), use_case)
+
+    canonical_source = calls[0][1]
+    assert np.array_equal(
+        canonical_source, _wav_bytes_to_canonical_array(_make_wav_bytes())
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"trim_start_seconds": -0.5}, id="negative-start"),
+        pytest.param({"trim_end_seconds": -0.1}, id="negative-end"),
+        pytest.param({"trim_start_seconds": float("nan")}, id="nan-start"),
+        pytest.param({"trim_end_seconds": float("nan")}, id="nan-end"),
+        pytest.param({"trim_start_seconds": float("inf")}, id="inf-start"),
+        pytest.param(
+            {"trim_start_seconds": 2.0, "trim_end_seconds": 1.0}, id="reversed"
+        ),
+        pytest.param(
+            {"trim_start_seconds": 1.0, "trim_end_seconds": 1.0}, id="equal"
+        ),
+    ],
+)
+def test_cue_request_rejects_negative_non_finite_and_reversed_trim_bounds(kwargs):
+    with pytest.raises(InvalidCueRequestError):
+        CueRequest(cue_id="cue-1", asset_id="asset-1", **kwargs)
+
+
+def test_cue_request_rejects_label_exceeding_max_length():
+    with pytest.raises(InvalidCueRequestError):
+        CueRequest(
+            cue_id="cue-1",
+            asset_id="asset-1",
+            label="x" * (MAX_CUE_LABEL_CODEPOINTS + 1),
+        )
+
+
+def test_cue_request_accepts_label_at_max_length():
+    label = "x" * MAX_CUE_LABEL_CODEPOINTS
+    request = CueRequest(cue_id="cue-1", asset_id="asset-1", label=label)
+    assert request.label == label
+
+
+def test_trim_start_at_or_after_cue_duration_is_rejected_before_persistence(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()  # 0.3s total
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1", asset_id=cue_id, trim_start_seconds=0.3
+            )
+        ],
+    )
+    with pytest.raises(InvalidCueRequestError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+def test_trim_end_exceeding_cue_duration_is_rejected_before_persistence(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()  # 0.3s total
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1", asset_id=cue_id, trim_end_seconds=0.31
+            )
+        ],
+    )
+    with pytest.raises(InvalidCueRequestError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+def test_empty_effective_interval_is_rejected_before_persistence(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    # Both bounds round to the same sample index, leaving zero effective
+    # samples in the requested interval.
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1",
+                asset_id=cue_id,
+                trim_start_seconds=0.1,
+                trim_end_seconds=0.1 + 1e-7,
+            )
+        ],
+    )
+    with pytest.raises(InvalidCueRequestError):
+        _create_analysis(payload, Response(), use_case)
+    assert _persisted_count(use_case) == 0
+
+
+def test_cue_duration_guardrail_runs_on_full_media_before_trim_is_applied(
+    use_case, source_asset_id
+):
+    cue_bytes = _make_three_segment_cue_wav_bytes()  # 0.3s total
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    use_case._max_cue_media_duration_seconds = 0.05  # smaller than the full 0.3s
+
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1",
+                asset_id=cue_id,
+                trim_start_seconds=0.0,
+                # A tiny requested subsegment that would fit comfortably
+                # if only the trimmed portion -- not the full uploaded
+                # Cue -- were checked against the guardrail.
+                trim_end_seconds=0.01,
+            )
+        ],
+    )
+    with pytest.raises(ResourceLimitExceededError):
         _create_analysis(payload, Response(), use_case)
     assert _persisted_count(use_case) == 0
