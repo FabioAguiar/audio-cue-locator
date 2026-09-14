@@ -28,11 +28,14 @@ import { useAnalysisPolling } from "../hooks/useAnalysisPolling";
  * visualization (M6-04). A `succeeded` Analysis is acknowledged here
  * without fetching or rendering its Result body.
  *
- * This component is not yet mounted by `webui/src/main.tsx`: wiring it
- * into the application shell is outside this issue's authorized edit
- * paths (`webui/src/main.tsx` is a verified-current M6-01 output this
- * handoff does not authorize modifying).
+ * M6-06 mounts this component as the application's entry view and uses
+ * `onViewResults` to carry the server-issued Analysis identity into the
+ * existing result view after lifecycle polling reports success.
  */
+
+export interface NewAnalysisPageProps {
+  onViewResults: (analysisId: string) => void;
+}
 
 interface CueFileEntry {
   /** Stable client-side key for React list rendering; distinct from the
@@ -58,7 +61,9 @@ function ApiErrorNotice({ error }: { error: ErrorPublic }): JSX.Element {
   );
 }
 
-export default function NewAnalysisPage(): JSX.Element {
+export default function NewAnalysisPage({
+  onViewResults,
+}: NewAnalysisPageProps): JSX.Element {
   const [sourceMediaFile, setSourceMediaFile] = useState<File | null>(null);
   const [cueEntries, setCueEntries] = useState<CueFileEntry[]>([
     newCueFileEntry(),
@@ -234,6 +239,11 @@ export default function NewAnalysisPage(): JSX.Element {
                   </>
                 )}
             </p>
+          )}
+          {polling.analysis?.status === "succeeded" && (
+            <button type="button" onClick={() => onViewResults(analysisId)}>
+              View results
+            </button>
           )}
         </section>
       )}
