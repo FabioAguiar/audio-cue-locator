@@ -24,6 +24,33 @@ placeholder scaffold. From `/`, a user can:
   Analysis-level failures -- as soon as they are available, and download
   the byte-identical Result JSON.
 
+### Cue Start/End: Cue-local bounds, not source-media bounds (S0005)
+
+A cue's optional `Start time`/`End time` (`trim_start_seconds`/
+`trim_end_seconds`) are positions **inside that cue's own audio file**, not
+positions inside the source media being searched -- they never constrain
+where in the source media a match may be found
+(`specs/S0005-cue-trim-validation-clarity-and-analysis-creation-regression/
+spec.md`). The WebUI states this explicitly next to the Start/End fields,
+and their placeholder examples (`e.g. 00:00:01` / `e.g. 00:00:03`) are
+short, Cue-scale values rather than source-media-scale ones -- they are
+examples, never defaults, and neither field is ever pre-populated.
+
+Leaving both fields blank uses the cue's full duration; this is the normal
+case and is not an error. `Start`/`End` accept only `MM:SS`, `MM:SS.fraction`,
+`HH:MM:SS`, or `HH:MM:SS.fraction` (S0004); this presentation-layer parsing
+and the existing start-before-end cross-field check are local convenience
+only and do not replace backend validation. The backend remains the sole
+authoritative check for whether a bound actually falls within the cue's real
+decoded duration -- the WebUI never decodes cue audio itself (no
+`AudioContext`/`HTMLAudioElement` probing, no manual WAV/RIFF duration
+parsing) to duplicate that check. When the server rejects a request with
+`error_code: validation_error` and at least one Start/End field was not
+left blank, the WebUI shows an additional, explicitly conditional advisory
+suggesting the user verify the Cue-local bounds against that cue's own
+duration; it never claims certainty about the server's exact cause, and it
+is never shown when every Start/End field was blank.
+
 Temporal/timeline visualization remains out of scope (M6-04's postponement
 still applies; see `docs/vision.md`), and no media preview/play control is
 implemented (S0004, `specs/S0004-responsive-single-screen-home-design-

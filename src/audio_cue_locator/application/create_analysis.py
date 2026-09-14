@@ -773,6 +773,23 @@ class CreateAnalysisUseCase:
                         trim_end_seconds=cue.trim_end_seconds,
                     )
                 )
+        except InvalidCueRequestError:
+            # S0005: a duration-aware Cue interval rejection (`_select_cue_
+            # interval`, once the Cue's own decoded duration is known) is an
+            # Application validation outcome, not a media/canonicalization
+            # failure -- kept distinguishable from the `except Exception`
+            # branch below so an operator can tell "the requested Cue
+            # interval was invalid" apart from "the Asset's own content
+            # could not be canonicalized" (docs/observability.md).
+            # analysis_id is never available here, for the same reason
+            # noted below: no Analysis is persisted yet.
+            emit_diagnostic_event(
+                event="cue_validation_failed",
+                boundary="application",
+                outcome="failed",
+                category="InvalidCueRequestError",
+            )
+            raise
         except Exception as exc:
             # M7-04: application/media-processing boundary diagnostic.
             # analysis_id is never available here: every rejection this

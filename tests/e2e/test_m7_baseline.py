@@ -414,10 +414,32 @@ def test_webm_source_with_audio_completes_the_real_http_analysis_flow(
                 content_type="audio/wav",
                 expected_media_type="audio/wav",
             )
-            created = await _create_analysis(
-                client, source["identifier"], [cue["identifier"]]
+
+            # S0005 acceptance: the WebM regression must explicitly cover
+            # blank/null S0003 trim fields (the exact user-observed path)
+            # rather than merely omitting them, and must confirm the
+            # request explicitly reaches 202 before any downstream
+            # assertion (`specs/S0005-cue-trim-validation-clarity-and-
+            # analysis-creation-regression/spec.md` section 4.8).
+            created = await client.post(
+                "/api/v1/analyses",
+                json={
+                    "source_asset_id": source["identifier"],
+                    "cues": [
+                        {
+                            "cue_id": "cue-1",
+                            "asset_id": cue["identifier"],
+                            "label": None,
+                            "trim_start_seconds": None,
+                            "trim_end_seconds": None,
+                        }
+                    ],
+                },
             )
             assert created.status_code == 202, created.text
+            created_payload = created.json()
+            assert created_payload["cues"][0]["trim_start_seconds"] is None
+            assert created_payload["cues"][0]["trim_end_seconds"] is None
             location = created.headers["location"]
 
             terminal = await _poll_terminal(

@@ -50,6 +50,7 @@ run, set:
 | `E2E_MATCHING_CUE_PATH` | First WAV cue known to occur in the source |
 | `E2E_SECOND_MATCHING_CUE_PATH` | Second WAV cue known to occur in the source |
 | `E2E_NO_MATCH_CUE_PATH` | WAV cue curated not to match the source under the active configuration |
+| `E2E_WEBM_SOURCE_MEDIA_PATH` | A supported WebM source containing an audio stream (S0002/S0005 WebM regression) |
 | `E2E_ANALYSIS_TIMEOUT_MS` | Optional terminal-state timeout; defaults to `180000` |
 
 Fixture paths and media bytes are runtime inputs. They must not be copied into
@@ -81,6 +82,53 @@ polling, and result flow. It asserts both the visible, distinct “No match foun
 for this cue.” presentation and the API Result outcome `kind: "no_match"` while
 the Analysis itself remains successful.
 
+### WebM source with blank Cue trims (S0005)
+
+The browser selects a real WebM source (`E2E_WEBM_SOURCE_MEDIA_PATH`) and one
+matching WAV cue, leaving Name/Start/End blank, and submits the form. The test
+asserts, from the real captured request/response traffic rather than inferred
+UI state:
+
+- the source-media upload response reports `media_type: "video/webm"` (WebM
+  is detected/accepted, not rejected as unsupported media);
+- the captured `POST /api/v1/analyses` request body serializes the blank
+  Start/End as `trim_start_seconds: null` and `trim_end_seconds: null` --
+  full-Cue semantics, never `0`/`0`;
+- the real `/api/v1/analyses` response status is checked and is explicitly
+  `202` before its body is ever treated as an Analysis (a `400
+  validation_error` would fail the test at that boundary instead of
+  continuing with an undefined Analysis ID);
+- the scenario still reaches a visible terminal Results state (the
+  **Download result JSON** control becomes visible).
+
+This is the direct regression for the real-user WebM + blank-Start/End path
+this spec exists for
+(`specs/S0005-cue-trim-validation-clarity-and-analysis-creation-regression/
+spec.md`).
+
+### Duration-relative invalid Cue trim (S0005)
+
+The browser submits a real, valid WAV cue with a deliberately out-of-range
+Cue-local End bound (`99:59`, far beyond the cue-upload duration guardrail,
+so any successfully uploaded cue is guaranteed to be shorter than it) and a
+blank Start, against a real supported source. It asserts, without mocking or
+intercepting the Analysis endpoint:
+
+- both the source-media and cue uploads succeed;
+- the real `POST /api/v1/analyses` response is `400` with
+  `error_code: "validation_error"`;
+- the existing public Error notice (`message`/`error_code`/`correlation_id`)
+  remains visible unchanged;
+- the additional, explicitly conditional trim advisory is visible and does
+  not assert a diagnosis (no claimed cue duration, no "the trim is
+  invalid");
+- no Analysis ID is adopted and no Results heading/success state appears.
+
+A companion scenario proves the same advisory is *not* shown for a real
+`400 validation_error` triggered with every Start/End field left blank (an
+over-length Cue label, unrelated to trim bounds), so the advisory is never
+shown merely because the ErrorCode is `validation_error`.
+
 ### Sanitized error
 
 The browser submits a deliberately unsupported source-media payload to the real
@@ -106,6 +154,9 @@ be changed to “passed” without an authorized real-backend execution.
 | JSON download | Download bytes equal real Result response bytes | Not executed in this phase |
 | Public API only | Same-origin `fetch`/XHR allowlist under `/api/v1` | Not executed in this phase |
 | Timeline, if introduced | Not applicable; M6-04 recorded justified postponement | Not applicable |
+| WebM + blank Cue trims (S0005) | `video/webm` detected, `trim_start_seconds`/`trim_end_seconds` serialize as `null`, `/analyses` explicitly `202` before parsing, terminal Results reached | Not executed in this phase |
+| Duration-relative invalid trim (S0005) | Real `400 validation_error`, existing Error notice preserved, safe conditional trim advisory shown, no fabricated Result | Not executed in this phase |
+| Blank-trim `validation_error` shows no trim advisory (S0005) | Real unrelated `400 validation_error` with blank Start/End does not trigger the trim-specific advisory | Not executed in this phase |
 
 ## Test-phase recording requirements
 

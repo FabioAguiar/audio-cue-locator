@@ -27,6 +27,7 @@ leaving every created Analysis permanently `queued`).
 from __future__ import annotations
 
 import io
+import logging
 import struct
 import time
 import wave
@@ -83,6 +84,7 @@ from audio_cue_locator.interfaces.rest_api.schemas import (
     AnalysisCueReference,
     AnalysisStatus,
 )
+from audio_cue_locator.observability.events import LOGGER_NAME
 
 
 # --- fixtures and small builders --------------------------------------------
@@ -245,6 +247,20 @@ def _payload(source_asset_id: str, cue_asset_id: str) -> AnalysisCreateRequest:
         source_asset_id=source_asset_id,
         cues=[AnalysisCueReference(cue_id="cue-1", asset_id=cue_asset_id)],
     )
+
+
+def _acl_events(caplog: pytest.LogCaptureFixture) -> list[dict]:
+    """Every structured payload `emit_diagnostic_event` attached to a log
+    record, mirroring `tests/operational/test_observability.py::_acl_events`
+    and `tests/e2e/test_m7_baseline.py::_acl_events` exactly (same
+    attribute name, same shape; this project's tests do not cross-import
+    each other's helpers)."""
+
+    return [
+        record.audio_cue_locator_event
+        for record in caplog.records
+        if hasattr(record, "audio_cue_locator_event")
+    ]
 
 
 def _persisted_count(use_case) -> int:
@@ -837,3 +853,79 @@ def test_cue_duration_guardrail_runs_on_full_media_before_trim_is_applied(
     with pytest.raises(ResourceLimitExceededError):
         _create_analysis(payload, Response(), use_case)
     assert _persisted_count(use_case) == 0
+
+
+# --- S0005: diagnostic split between Cue validation and media canonicalization
+
+
+def test_duration_relative_invalid_cue_request_emits_cue_validation_failed_diagnostic(
+    use_case, source_asset_id, caplog: pytest.LogCaptureFixture
+):
+    """A duration-relative `InvalidCueRequestError` raised after the Cue is
+    decoded (`_select_cue_interval`, once its own duration is known) is
+    still raised, still prevents persistence and executor submission, and
+    is reported as an Application validation event -- distinct from a
+    media/canonicalization failure -- per
+    `specs/S0005-cue-trim-validation-clarity-and-analysis-creation-
+    regression/spec.md` section 4.1/4.7."""
+
+    cue_bytes = _make_three_segment_cue_wav_bytes()  # 0.3s total
+    cue_id = _ingest_cue_bytes(use_case, cue_bytes)
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[
+            AnalysisCueReference(
+                cue_id="cue-1", asset_id=cue_id, trim_end_seconds=0.31
+            )
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        with pytest.raises(InvalidCueRequestError):
+            _create_analysis(payload, Response(), use_case)
+
+    assert _persisted_count(use_case) == 0
+
+    events = _acl_events(caplog)
+    cue_validation_events = [
+        event for event in events if event["event"] == "cue_validation_failed"
+    ]
+    assert len(cue_validation_events) == 1
+    assert cue_validation_events[0]["boundary"] == "application"
+    assert cue_validation_events[0]["outcome"] == "failed"
+    assert cue_validation_events[0]["category"] == "InvalidCueRequestError"
+    assert not any(event["event"] == "media_canonicalization_failed" for event in events)
+
+
+def test_real_media_canonicalization_failure_still_emits_media_canonicalization_failed_diagnostic(
+    use_case, cue_asset_id, caplog: pytest.LogCaptureFixture
+):
+    """An actual media canonicalization/probe/decode failure (here, a
+    malformed WAV source that passes container sniffing but fails `wave`'s
+    own chunk parse) continues to emit `media_canonicalization_failed` in
+    `boundary=media_processing`, and is never relabeled
+    `cue_validation_failed`, per the same spec section."""
+
+    source_asset = use_case._asset_storage.ingest(
+        _malformed_wav_bytes(),
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="broken.wav",
+        detected_media_type="audio/wav",
+    )
+    payload = _payload(source_asset.identifier, cue_asset_id)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        with pytest.raises(UnsupportedMediaError):
+            _create_analysis(payload, Response(), use_case)
+
+    assert _persisted_count(use_case) == 0
+
+    events = _acl_events(caplog)
+    media_events = [
+        event for event in events if event["event"] == "media_canonicalization_failed"
+    ]
+    assert len(media_events) == 1
+    assert media_events[0]["boundary"] == "media_processing"
+    assert media_events[0]["outcome"] == "failed"
+    assert media_events[0]["category"] == "AssetCanonicalizationError"
+    assert not any(event["event"] == "cue_validation_failed" for event in events)

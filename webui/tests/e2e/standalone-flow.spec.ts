@@ -230,10 +230,10 @@ async function fillCueRow(
     await row.getByPlaceholder("e.g. Notification sound").fill(cue.name);
   }
   if (cue.startText !== undefined) {
-    await row.getByPlaceholder("e.g. 00:00:10").fill(cue.startText);
+    await row.getByPlaceholder("e.g. 00:00:01").fill(cue.startText);
   }
   if (cue.endText !== undefined) {
-    await row.getByPlaceholder("e.g. 00:00:15").fill(cue.endText);
+    await row.getByPlaceholder("e.g. 00:00:03").fill(cue.endText);
   }
 }
 
@@ -294,6 +294,12 @@ async function submitAnalysis(
   };
 
   const analysesResponse = await analysesResponsePromise;
+  // S0005 section 4.9: the real Analysis-creation HTTP status must be
+  // checked before the response body is ever treated as an Analysis --
+  // a `400 validation_error` must fail here, at this boundary, with the
+  // real response observable, instead of continuing with an undefined/
+  // nonexistent `analysis_id`.
+  expect(analysesResponse.status()).toBe(202);
   const analysis = (await analysesResponse.json()) as { analysis_id: string };
 
   await expect(page.getByRole("heading", { name: "Results" })).toBeVisible({
@@ -302,6 +308,56 @@ async function submitAnalysis(
   await expect(page.getByText(/^Status: /)).toHaveCount(0);
 
   return { analysisId: analysis.analysis_id, requestCues: requestBody.cues };
+}
+
+interface RejectedAnalysisSubmission {
+  status: number;
+  requestCues: AnalysisCueRequestBody[];
+  error: ErrorEnvelope;
+}
+
+/**
+ * Mirrors `submitAnalysis` up through the real `/api/v1/analyses` response,
+ * but for a scenario that is expected to be rejected (S0005 section 4.11):
+ * it asserts the non-202 status directly, returns the parsed public Error
+ * envelope, and never adopts an Analysis ID or waits for a Results heading
+ * -- there is no Analysis to poll.
+ */
+async function submitAnalysisExpectingRejection(
+  page: Page,
+  baseUrl: string,
+  sourceMediaPath: string | Parameters<Page["setInputFiles"]>[1],
+  cues: CueInput[],
+): Promise<RejectedAnalysisSubmission> {
+  await fillAnalysisForm(page, baseUrl, sourceMediaPath, cues);
+
+  const createButton = page.getByRole("button", { name: "Create Analysis" });
+  await expect(createButton).toBeEnabled();
+
+  const analysesRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/v1/analyses",
+  );
+  const analysesResponsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/v1/analyses",
+    { timeout: analysisTimeoutMs },
+  );
+  await createButton.click();
+
+  const analysesRequest = await analysesRequestPromise;
+  const requestBody = analysesRequest.postDataJSON() as {
+    cues: AnalysisCueRequestBody[];
+  };
+
+  const analysesResponse = await analysesResponsePromise;
+  const status = analysesResponse.status();
+  expect(status).not.toBe(202);
+  const error = (await analysesResponse.json()) as ErrorEnvelope;
+
+  return { status, requestCues: requestBody.cues, error };
 }
 
 function captureSuccessfulResultBodies(
@@ -364,8 +420,8 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(sourceMediaInput(page)).toBeAttached();
     await expect(page.getByLabel("Cue 1", { exact: true })).toBeAttached();
     await expect(page.getByPlaceholder("e.g. Notification sound")).toBeVisible();
-    await expect(page.getByPlaceholder("e.g. 00:00:10")).toBeVisible();
-    await expect(page.getByPlaceholder("e.g. 00:00:15")).toBeVisible();
+    await expect(page.getByPlaceholder("e.g. 00:00:01")).toBeVisible();
+    await expect(page.getByPlaceholder("e.g. 00:00:03")).toBeVisible();
 
     await page.getByRole("button", { name: "Add another cue" }).click();
     await expect(page.getByLabel("Cue 2", { exact: true })).toBeAttached();
@@ -495,12 +551,12 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       }
     });
 
-    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:10").fill("");
+    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:01").fill("");
     await expect(createButton).toBeEnabled();
 
     // Cross-field validation: start >= end is rejected before any upload.
-    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:10").fill("00:00:10");
-    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:15").fill("00:00:05");
+    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:01").fill("00:00:10");
+    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:03").fill("00:00:05");
     await expect(createButton).toBeDisabled();
     await expect(page.getByText("Start time must be before end time.")).toBeVisible();
 
@@ -508,8 +564,8 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
 
     // 20-cue admission guard: starting from 1 row, 19 additions reach the
     // limit; the button then disables and no 21st row can be created.
-    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:10").fill("");
-    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:15").fill("");
+    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:01").fill("");
+    await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:03").fill("");
     const addButton = page.getByRole("button", { name: "Add another cue" });
     for (let i = 0; i < 19; i += 1) {
       await addButton.click();
@@ -639,10 +695,14 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     );
 
     // `submitAnalysis` already asserts the standard success path (the
-    // Results card appears and no status card is rendered) -- exactly
-    // what this scenario needs for "an Analysis is created and reaches a
-    // visible terminal state".
+    // Results card appears, no status card is rendered, and the real
+    // `/api/v1/analyses` response is explicitly 202 before its body is
+    // treated as an Analysis -- S0005 section 4.9) -- exactly what this
+    // scenario needs for "an Analysis is created and reaches a visible
+    // terminal state".
     const analysisPromise = submitAnalysis(page, baseUrl, webmSourceMedia, [
+      // Blank Name/Start/End: the direct regression for the user's
+      // observed WebM + blank-trim path (S0005 section 4.10).
       { path: fixtures.matchingCue },
     ]);
 
@@ -655,7 +715,13 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     };
     expect(asset.media_type).toBe("video/webm");
 
-    await analysisPromise;
+    const { requestCues } = await analysisPromise;
+
+    // S0005 section 4.10: blank Start/End must serialize as null, never
+    // as 0/0 -- the exact regression for the user's originally rejected
+    // blank-trim WebM request.
+    expect(requestCues[0].trim_start_seconds ?? null).toBeNull();
+    expect(requestCues[0].trim_end_seconds ?? null).toBeNull();
 
     await expect(
       page.getByRole("button", { name: "Download result JSON" }),
@@ -665,6 +731,137 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     expect(
       countCalls(calls, "POST", /^\/api\/v1\/assets\/source-media$/),
     ).toBe(1);
+  });
+
+  test("rejects an out-of-range Cue-local trim bound with a safe advisory and no fabricated Result (S0005)", async ({
+    page,
+  }) => {
+    test.setTimeout(analysisTimeoutMs + 30_000);
+    const baseUrl = webuiBaseUrl();
+    const fixtures = fixturePaths();
+    const calls = beginPublicApiAudit(page);
+
+    const sourceMediaResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/v1/assets/source-media",
+      { timeout: analysisTimeoutMs },
+    );
+    const cueResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/v1/assets/cue",
+      { timeout: analysisTimeoutMs },
+    );
+
+    // A valid WAV Cue with a deliberately out-of-range Cue-local End bound
+    // (S0005 section 4.11): the current Cue upload duration guardrail
+    // (`DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS`, 600s) is far lower than
+    // 99:59 (5,999s), so any successfully uploaded Cue is guaranteed to be
+    // shorter than this bound -- the server-side duration-relative
+    // rejection is deterministic, not a real-media coincidence. Start is
+    // left blank.
+    const submission = await submitAnalysisExpectingRejection(
+      page,
+      baseUrl,
+      fixtures.sourceMedia,
+      [{ path: fixtures.matchingCue, endText: "99:59" }],
+    );
+
+    // Both real uploads succeeded before the Analysis-creation rejection.
+    const sourceMediaResponse = await sourceMediaResponsePromise;
+    expect(sourceMediaResponse.ok()).toBe(true);
+    const cueResponse = await cueResponsePromise;
+    expect(cueResponse.ok()).toBe(true);
+
+    expect(submission.status).toBe(400);
+    expect(submission.error.error_code).toBe("validation_error");
+    expect(submission.requestCues[0].trim_start_seconds ?? null).toBeNull();
+    expect(submission.requestCues[0].trim_end_seconds).toBe(99 * 60 + 59);
+
+    // The existing public Error notice remains visible with its exact
+    // message/error_code/correlation_id.
+    await expect(page.getByRole("alert")).toHaveText(
+      `${submission.error.message} (error_code: ${submission.error.error_code}, correlation_id: ${submission.error.correlation_id})`,
+    );
+
+    // The safe, conditional trim advisory is shown alongside it.
+    const advisory = page.getByRole("status");
+    await expect(advisory).toBeVisible();
+    await expect(advisory).toContainText("inside the cue file");
+    await expect(advisory).toContainText("duration");
+    await expect(advisory).not.toContainText("invalid");
+    await expect(advisory).not.toContainText(/\d+(\.\d+)?\s*s(econds)?\b/i);
+
+    // No Analysis ID is adopted, no Results heading appears, and no status
+    // polling ever starts -- the Results success state is not fabricated.
+    await expect(page.getByRole("heading", { name: "Results" })).toHaveCount(0);
+    expect(
+      countCalls(calls, "GET", /^\/api\/v1\/analyses\/[^/]+$/),
+    ).toBe(0);
+
+    assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
+    expect(countCalls(calls, "POST", /^\/api\/v1\/analyses$/)).toBe(1);
+  });
+
+  test("does not show the trim advisory for a blank-trim validation_error unrelated to trim bounds (S0005)", async ({
+    page,
+  }) => {
+    test.setTimeout(analysisTimeoutMs + 30_000);
+    const baseUrl = webuiBaseUrl();
+    const fixtures = fixturePaths();
+
+    // A real server-side validation_error unrelated to trim bounds (an
+    // over-length Cue label -- S0003's own `MAX_CUE_LABEL_CODEPOINTS`,
+    // 80), with Start/End left blank throughout. The Name field's `
+    // maxLength` HTML attribute is a client-side convenience only; it is
+    // removed here so this scenario can prove genuine backend validation,
+    // not to bypass any documented public contract. No endpoint is mocked
+    // or intercepted -- the request reaches the real API.
+    await fillAnalysisForm(page, baseUrl, fixtures.sourceMedia, [
+      { path: fixtures.matchingCue },
+    ]);
+    const nameField = page
+      .locator(".cue-row")
+      .first()
+      .getByPlaceholder("e.g. Notification sound");
+    await nameField.evaluate((element) => element.removeAttribute("maxlength"));
+    await nameField.fill("x".repeat(81));
+
+    const createButton = page.getByRole("button", { name: "Create Analysis" });
+    await expect(createButton).toBeEnabled();
+
+    const analysesResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/v1/analyses",
+      { timeout: analysisTimeoutMs },
+    );
+    const analysesRequestPromise = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/v1/analyses",
+    );
+    await createButton.click();
+
+    const analysesRequest = await analysesRequestPromise;
+    const requestBody = analysesRequest.postDataJSON() as {
+      cues: AnalysisCueRequestBody[];
+    };
+    expect(requestBody.cues[0].trim_start_seconds ?? null).toBeNull();
+    expect(requestBody.cues[0].trim_end_seconds ?? null).toBeNull();
+
+    const analysesResponse = await analysesResponsePromise;
+    expect(analysesResponse.status()).toBe(400);
+    const error = (await analysesResponse.json()) as ErrorEnvelope;
+    expect(error.error_code).toBe("validation_error");
+
+    await expect(page.getByRole("alert")).toBeVisible();
+    // The trim-specific advisory must not appear: no trim text was
+    // supplied, so this validation_error is never attributable to trim
+    // bounds.
+    await expect(page.getByRole("status")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Results" })).toHaveCount(0);
   });
 
   test("opens and closes Help and Settings dialogs accessibly", async ({ page }) => {
@@ -727,7 +924,7 @@ test.describe("responsive smoke checks", () => {
 
       if (viewport.label === "mobile") {
         const nameField = page.getByPlaceholder("e.g. Notification sound");
-        const startField = page.getByPlaceholder("e.g. 00:00:10");
+        const startField = page.getByPlaceholder("e.g. 00:00:01");
         const nameBox = await nameField.boundingBox();
         const startBox = await startField.boundingBox();
         // Optional fields stack vertically rather than overflowing sideways.

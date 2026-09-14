@@ -129,6 +129,13 @@ export default function NewAnalysisPage(): JSX.Element {
   const [cueFilenamesById, setCueFilenamesById] = useState<
     Record<string, string>
   >({});
+  // S0005: an additional, conditional advisory shown only alongside a
+  // server `validation_error` from Analysis creation, and only when the
+  // submitted request actually carried a non-blank Start/End value -- a
+  // blank-trim `validation_error` is never attributable to trim bounds
+  // (`specs/S0005-cue-trim-validation-clarity-and-analysis-creation-
+  // regression/spec.md`).
+  const [trimAdvisoryVisible, setTrimAdvisoryVisible] = useState(false);
 
   const polling = useAnalysisPolling(analysisId);
   const analysisActive = analysisId !== null;
@@ -220,6 +227,7 @@ export default function NewAnalysisPage(): JSX.Element {
     setSubmitting(true);
     setSubmitError(null);
     setSubmitNetworkErrorMessage(null);
+    setTrimAdvisoryVisible(false);
 
     try {
       const sourceUpload = await uploadSourceMedia(sourceMediaFile);
@@ -230,6 +238,7 @@ export default function NewAnalysisPage(): JSX.Element {
 
       const cues: AnalysisCueReference[] = [];
       const filenamesById: Record<string, string> = {};
+      let anyCueHasNonBlankTrimText = false;
       for (let index = 0; index < activeCues.length; index += 1) {
         const entry = activeCues[index];
         const cueUpload = await uploadCue(entry.file as File);
@@ -241,6 +250,9 @@ export default function NewAnalysisPage(): JSX.Element {
         const trimmedName = entry.name.trim();
         const startParse = parseCueTimeText(entry.startText);
         const endParse = parseCueTimeText(entry.endText);
+        if (entry.startText.trim() !== "" || entry.endText.trim() !== "") {
+          anyCueHasNonBlankTrimText = true;
+        }
         cues.push({
           cue_id: cueId,
           asset_id: cueUpload.data.identifier,
@@ -258,6 +270,14 @@ export default function NewAnalysisPage(): JSX.Element {
       );
       if (!analysisCreation.ok) {
         setSubmitError(analysisCreation.error);
+        // S0005: this advisory is conditional -- it never claims certainty
+        // about the server's root cause, and it must not appear for a
+        // blank-trim validation_error (the rejection must be something
+        // else in that case).
+        setTrimAdvisoryVisible(
+          analysisCreation.error.error_code === "validation_error" &&
+            anyCueHasNonBlankTrimText,
+        );
         return;
       }
 
@@ -452,6 +472,10 @@ export default function NewAnalysisPage(): JSX.Element {
                           }
                         />
                       </label>
+                      <p className="cue-file-help">
+                        Start and End are positions inside this cue file, not
+                        the source media.
+                      </p>
                       <label>
                         <span>
                           Start time <em>(optional)</em>
@@ -459,7 +483,7 @@ export default function NewAnalysisPage(): JSX.Element {
                         <input
                           type="text"
                           inputMode="numeric"
-                          placeholder="e.g. 00:00:10"
+                          placeholder="e.g. 00:00:01"
                           className={startError || crossError ? "has-error" : undefined}
                           value={entry.startText}
                           disabled={submitting || analysisActive}
@@ -485,7 +509,7 @@ export default function NewAnalysisPage(): JSX.Element {
                         <input
                           type="text"
                           inputMode="numeric"
-                          placeholder="e.g. 00:00:15"
+                          placeholder="e.g. 00:00:03"
                           className={endError || crossError ? "has-error" : undefined}
                           value={entry.endText}
                           disabled={submitting || analysisActive}
@@ -561,6 +585,12 @@ export default function NewAnalysisPage(): JSX.Element {
         </form>
 
         {submitError && <ApiErrorNotice error={submitError} />}
+        {submitError && trimAdvisoryVisible && (
+          <p role="status" className="form-alert">
+            Start and End are positions inside the cue file. Check that the
+            values fall within that cue&apos;s duration.
+          </p>
+        )}
         {submitNetworkErrorMessage && (
           <p role="alert" className="form-alert">
             {submitNetworkErrorMessage}

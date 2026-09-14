@@ -80,21 +80,32 @@ required.
 |---|---|---|
 | `api` | `interfaces/rest_api/errors.py`, `_error_response` | `api_request_failed` for every `/api/v1` failure response, tagged with that response's own `correlation_id` and, when the caught exception carries an `analysis_id` attribute, that identifier too. |
 | `executor` | `infrastructure/execution/local_analysis_executor.py`, `_claim_and_run` | `analysis_execution_succeeded` / `matching_stage_failed`, each carrying `analysis_id` and a coarse `duration_ms` reused from `LifecycleTimestamps.duration_seconds`. |
-| `media_processing` | `application/create_analysis.py`, `CreateAnalysisUseCase.create` | `media_canonicalization_failed` around Asset resolution/canonicalization; no `analysis_id` is available here, since every rejection happens before an Analysis is ever persisted. |
+| `application` | `application/create_analysis.py`, `CreateAnalysisUseCase.create` | `cue_validation_failed`, for a duration-aware Cue request rejection (`InvalidCueRequestError` raised once the referenced Cue's own decoded duration is known -- for example a requested `trim_end_seconds` exceeding it, or an effective interval containing no canonical sample) -- distinguished from `media_processing`'s `media_canonicalization_failed` below (S0005, `specs/S0005-cue-trim-validation-clarity-and-analysis-creation-regression/spec.md`). No `analysis_id` is available here either, for the same reason as `media_canonicalization_failed`: no Analysis has yet been persisted. |
+| `media_processing` | `application/create_analysis.py`, `CreateAnalysisUseCase.create` | `media_canonicalization_failed` for any other pre-persistence Asset resolution/probing/decoding/canonicalization failure; no `analysis_id` is available here, since every rejection happens before an Analysis is ever persisted. |
 | `persistence` | `infrastructure/analysis_repository/sqlite_repository.py`, `create`/`add_owned_asset`/`transition` | `analysis_persistence_write_failed`, emitted only for a genuinely unexpected exception -- an already-existing/missing/invalid-record/rejected-transition outcome is excluded, since those are ordinary business-rule rejections, not persistence-layer failures. |
 | `cleanup` | `infrastructure/asset_storage/retention_policy.py`, `cleanup_expired_assets` | `asset_retention_cleanup_completed`, once per pass, carrying only `count` (the number of Assets actually deleted). |
 
-`application` and `result` are covered indirectly today: `application`'s
-own request-validation failures (`TooManyCuesError` and the Asset-
-existence/identifier checks) surface through the shared `api` boundary
-event once `interfaces.rest_api.errors` translates them, and no dedicated
-`result`-boundary producer exists yet, since `LocalAnalysisExecutor`'s own
-`analysis_execution_succeeded` event already reports the terminal Result
-outcome. `matching` is not a separate emission site: `infrastructure/
-acoustic_matching/` (`acceptance.py`, `baseline.py`) defines no custom
-exception types and is not edited by this issue (see "What this issue does
-not change" below); a matching-stage failure is reported as the
-executor's own `matching_stage_failed` event instead.
+`application`'s own pre-persistence Cue-validation event
+(`cue_validation_failed`, above) never logs `cue_id`, `label`, either trim
+value, the Cue's own decoded duration, an Asset path, a filename, the
+raw `InvalidCueRequestError` message, or media bytes -- the fixed field
+schema below is itself the allowlist, and this event carries only the
+fixed `event`/`boundary`/`outcome`/`category` fields, exactly like
+`media_canonicalization_failed`. A request-scoped `InvalidCueRequestError`
+raised *before* `CreateAnalysisUseCase.create()` is ever called (for
+example, `CueRequest.__post_init__`'s own structural checks, evaluated by
+`interfaces.rest_api.analysis_routes` while building the use case's input)
+is not covered by this dedicated event; it still surfaces through the
+shared `api`-boundary `api_request_failed` event once `interfaces.rest_api.
+errors` translates it, exactly as before S0005. `result` is covered
+indirectly today: no dedicated `result`-boundary producer exists yet,
+since `LocalAnalysisExecutor`'s own `analysis_execution_succeeded` event
+already reports the terminal Result outcome. `matching` is not a separate
+emission site: `infrastructure/acoustic_matching/` (`acceptance.py`,
+`baseline.py`) defines no custom exception types and is not edited by this
+issue (see "What this issue does not change" below); a matching-stage
+failure is reported as the executor's own `matching_stage_failed` event
+instead.
 
 ## Remediated leak: matching-stage failure message
 
