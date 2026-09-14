@@ -1289,11 +1289,11 @@ Também exige:
 ### Documentação da Implementação
 
 - Estratégia aplicável: `milestones-only`
-- Avaliação esperada: realizar revisão formal dos gatilhos definidos em `architecture.md`, pois ao final desta milestone Core, Infrastructure, API e WebUI já existirão materialmente.
-- Documentos candidatos: `implementation-map-single` apenas se a revisão demonstrar necessidade real; `implementation-map-hierarchical` somente se um mapa único já seria excessivo.
+- Avaliação realizada (M7-06): revisão formal dos sete gatilhos definidos em `architecture.md` concluída contra evidência concreta pós-M7 (topologia de `src/`, `tests/` e `webui/`, caráter ainda planejamento-apenas deste documento, e o custo de consulta multi-arquivo observado em M7-01 a M7-05); nenhum gatilho confirmado. Achados detalhados registrados em `architecture.md`, seção "Estratégia de Documentação da Implementação".
+- Documentos candidatos: `implementation-map-single` apenas se uma revisão futura demonstrar necessidade real; `implementation-map-hierarchical` somente se um mapa único já seria excessivo.
 - Critério para criar: custo recorrente de navegação/handoff ou dificuldade material para localizar responsabilidades.
 - Critério para atualizar: somente se a estratégia for alterada e um documento acumulativo passar a existir.
-- Critério para não atualizar: se código, testes, arquitetura e milestones continuarem suficientes, confirmar a permanência em `milestones-only`.
+- Critério para não atualizar: confirmado -- código, testes, arquitetura e milestones permanecem suficientes; permanência em `milestones-only` confirmada por esta revisão.
 - Limite: qualquer mapa futuro deve orientar navegação, não servir como changelog, State operacional ou fonte absoluta.
 
 ### Dependências

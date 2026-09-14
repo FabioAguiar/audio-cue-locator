@@ -1074,6 +1074,22 @@ Nesse estágio:
 
 Essa combinação é suficiente até que a quantidade de áreas implementadas ou a frequência de handoffs torne a navegação materialmente custosa.
 
+### Revisão ao final de M7
+
+Com Core, Application, Infrastructure, REST API, WebUI e um runtime operacional reproduzível já existindo materialmente (M7-01 a M7-05), a estratégia foi revisada explicitamente contra os sete sinais abaixo, usando exemplos concretos pós-M7 em vez de um julgamento único.
+
+| Sinal | Achado |
+|---|---|
+| Crescimento para várias áreas implementadas com arquivos principais difíceis de localizar | Não observado. A topologia atual de `src/audio_cue_locator/` (oito subpacotes -- `core`; `application`, com seu próprio `ports/`; `infrastructure`, dividido em `acoustic_matching`, `analysis_repository`, `asset_storage`, `execution` e `media_processing`; `interfaces/rest_api`; `observability` -- 34 arquivos Python) segue diretamente as fronteiras já documentadas neste arquivo; nenhum handoff de M7-01 a M7-06 registrou dificuldade em localizar um arquivo principal. |
+| Repetição frequente das mesmas explicações em handoffs | Presente de forma limitada, mas atribuível à disciplina de reverificação independente que cada fase ASF (Specification/Analysis/State/Handoff/Control) exige, não à ausência de documentação: os fatos reconfirmados a cada fase (localização de arquivos, limites arquiteturais) foram idênticos e corretos em todas as reconfirmações, sem nenhuma correção necessária ao longo de M7-01 a M7-05. |
+| Uma issue típica exigir leitura ampla de áreas não relacionadas | A leitura ampla observada (por exemplo, mais de vinte caminhos consultados por `intents/M7/M7-05/implementation-handoff.json`) correlaciona com a natureza de validação end-to-end daquela issue específica, não com um padrão típico: issues de escopo mais estreito (M7-02, M7-03) não exigiram leitura equivalente. |
+| Dificuldade recorrente de identificar onde contratos ou responsabilidades estão implementados | Não observada. As fronteiras Core/Application/Infrastructure/Interfaces permanecem correspondidas de forma direta e verificável à estrutura de diretórios real. |
+| Crescimento substancial de WebUI, API, processamento, storage e integrações em paralelo | Crescimento real, porém ainda modesto em escala absoluta (34 arquivos Python em `src/`, três subdiretórios em `webui/src/`); a divisão de `infrastructure` em cinco subáreas reflete separação intencional, não sinal de descontrole. Um `implementation-map-single` ainda cobriria essa topologia em um único documento pequeno, o que por si só não demonstra necessidade. |
+| `milestones.md` começar a acumular descrição de estado implementado em vez de planejamento | Não observado. Busca no arquivo inteiro (1407 linhas, sete seções por milestone) não encontrou narrativa de estado implementado substituindo planejamento; a estrutura Objetivo/Problema/Escopo/Entregáveis Esperados permanece igual em todas as seções. |
+| Custo de contexto para manutenção assistida deixar de ser pequeno | O custo de consulta multi-arquivo observado não se traduziu em retrabalho, erro ou issue bloqueada: as cinco issues de M7 concluídas (M7-01 a M7-05) e a própria preparação desta revisão (M7-06) completaram suas confirmações sem contradição. Este é o sinal mais próximo de ocorrer e deve ser o mais monitorado a partir de M8. |
+
+Nenhum dos sete sinais está confirmado no momento desta revisão. A estratégia `milestones-only` permanece adotada e nenhum `docs/implementation-map.md` foi criado por esta revisão.
+
 ### Quando revisar a decisão
 
 A estratégia deverá ser reavaliada se ocorrer um ou mais destes sinais:
