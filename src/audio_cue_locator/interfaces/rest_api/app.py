@@ -64,6 +64,16 @@ one file, serialized by its own file locking and the `busy_timeout`
 PRAGMA `SQLiteAnalysisRepository.__init__` already sets. This wrapper
 embeds no SQL of its own; it only multiplexes the confirmed-existing
 constructor per thread.
+
+As of M7-03, this composition root also applies the already-implemented
+M4-05/M4-06 startup lifecycle: `_build_analysis_use_cases` calls
+`infrastructure.execution.restart_recovery.run_startup_recovery` and
+`infrastructure.asset_storage.retention_policy.cleanup_expired_assets`
+exactly once each, in that order, after constructing the repository and
+strictly before constructing `LocalAnalysisExecutor`, so recovery always
+runs before any `QUEUED` Analysis can be claimed. See
+`docs/retention-and-cleanup.md` for the applied wiring order and the
+startup-only trigger decision.
 """
 
 from __future__ import annotations
@@ -96,10 +106,16 @@ from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository impo
 from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage import (
     LocalFilesystemAssetStorage,
 )
+from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
+    cleanup_expired_assets,
+)
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
     DEFAULT_MAX_CONCURRENCY,
     InMemoryResultReferenceStore,
     LocalAnalysisExecutor,
+)
+from audio_cue_locator.infrastructure.execution.restart_recovery import (
+    run_startup_recovery,
 )
 from audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter import (
     DEFAULT_TIMEOUT_SECONDS,
@@ -362,11 +378,25 @@ def _build_analysis_use_cases(
     ``InMemoryResultReferenceStore`` closes the local-process accessibility
     gap: the executor writes a canonical Result body and the query use case
     reads that same body through its Application-owned reader Protocol.
+
+    Before the executor is constructed, this composition root runs the
+    M4-05/M4-06 startup lifecycle exactly once: ``run_startup_recovery``
+    resolves any Analysis left ``RUNNING`` by a prior crash to ``FAILED``,
+    strictly before any ``QUEUED`` Analysis can be claimed (M7-03,
+    preserving the exactly-once-before-any-claim precondition documented in
+    `docs/restart-and-recovery-policy.md`); ``cleanup_expired_assets`` then
+    deletes uniquely-owned, terminal, retention-eligible Asset bytes using
+    its existing default seven-day minimum window. Neither call is wired to
+    a periodic trigger: this local-first, single-process runtime has no
+    background-scheduler mechanism, so both run once per process start
+    (`docs/retention-and-cleanup.md`).
     """
 
     db_path = _analysis_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     repository = _ThreadLocalAnalysisRepository(db_path)
+    run_startup_recovery(repository)
+    cleanup_expired_assets(repository, storage)
     result_store = InMemoryResultReferenceStore()
     executor = LocalAnalysisExecutor(
         repository, result_store=result_store, max_concurrency=_max_concurrency()

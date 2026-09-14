@@ -98,6 +98,11 @@ storage/cues/
 *.sqlite3
 *.sqlite-shm
 *.sqlite-wal
+
+# audio-cue-locator's own local Asset Storage root (UUID-named, extensionless
+# upload/derived-artifact files; var/analysis_repository.sqlite3 above is
+# already excluded by *.sqlite3 -- see docs/retention-and-cleanup.md).
+var/asset_storage/
 runtime/
 state/
 !runtime/.gitkeep
