@@ -187,6 +187,15 @@ docker compose down
 
 See [`docs/local-operation.md`](docs/local-operation.md) for the full clean-build, startup, shutdown, storage, health-check, and configuration reference, including the two-container topology's rationale and known limitations.
 
+## Validated Demonstration
+
+Once the runtime above is up, both supported access modes can be exercised end to end:
+
+- **Standalone (WebUI):** open `http://localhost:8080`, submit a source media file together with one or more reference cues, follow the Analysis while it runs, then inspect and download the structured JSON result.
+- **Programmatic (REST API v1):** upload a source and cue via `POST /api/v1/assets/source-media` and `POST /api/v1/assets/cue`, create an Analysis via `POST /api/v1/analyses`, poll `GET /api/v1/analyses/{analysis_id}` until it reaches a terminal state, then retrieve `GET /api/v1/analyses/{analysis_id}/result`. See [`docs/rest-api-v1-contract.md`](docs/rest-api-v1-contract.md) for the full request/response contract.
+
+Both paths exercise the same real backend, API, storage, executor, media processing, and matcher — neither is a simulated or mocked demonstration. See [`docs/baseline-validation.md`](docs/baseline-validation.md) for the full M7 release-validation procedure, scenario-to-Definition-of-Done traceability matrix, and the regression/benchmark evidence this milestone records.
+
 ## Development Status
 
 Local installation and execution are documented in [Local Operation](#local-operation) above, via the packaged Docker/Compose runtime established during M7. Public or multi-user deployment is out of scope until a separate, explicitly authorized security review permits it (see [`docs/architecture.md`](docs/architecture.md)).
