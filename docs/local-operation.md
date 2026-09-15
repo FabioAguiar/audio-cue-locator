@@ -145,11 +145,54 @@ so this data persists across `docker compose restart`/`down` (without
 `-v`) and is not written into the repository working tree or the build
 context (excluded via [`.dockerignore`](../.dockerignore)).
 
+`/app/var/asset_storage` holds every uploaded and derived physical Asset as
+an extensionless, canonical-UUID-named file. Two independent, startup-only
+cleanup rules bound how long those bytes persist
+(`docs/artifact-retention-and-cleanup-policy.md`,
+`docs/retention-and-cleanup.md`):
+
+- **Analysis-owned bytes** -- once uniquely owned by a terminal (`SUCCEEDED`
+  or `FAILED`) Analysis, they are eligible for deletion **7 days** after
+  that Analysis's terminal timestamp.
+- **Unreferenced uploads** (S0012) -- a physical Asset that no persisted
+  Analysis has ever referenced (for example, an upload whose `POST
+  /analyses` call never happened) becomes eligible for deletion **24 hours**
+  after it was written to local storage, using the file's own storage
+  timestamp, never an Analysis timestamp.
+
+Both rules run once, at process startup, immediately before the API can
+claim a queued Analysis; neither is a periodic or per-request mechanism.
+Recurring/background cleanup remains explicitly out of scope until a
+future, separately authorized S0011 change. A consequence operators should
+expect: an upload left unreferenced for 24 hours or more is no longer
+guaranteed to still be available for a later Analysis-creation attempt --
+this is accepted staging behavior for the normal upload-then-create flow,
+not a bug.
+
+To inspect current local Asset storage usage safely (read-only, no state
+change):
+
+```bash
+du -sh /app/var
+du -sh /app/var/asset_storage
+find /app/var/asset_storage -maxdepth 1 -type f | wc -l
+```
+
+**Do not manually delete UUID-named files under `/app/var/asset_storage`.**
+A file may still be referenced by a persisted Analysis in any lifecycle
+state; only the two cleanup rules above -- which check every persisted
+reference before deleting anything -- are safe to rely on for reclaiming
+space.
+
 To reset all local state (Analysis history and stored media):
 
 ```bash
 docker compose down -v
 ```
+
+This is a destructive, whole-volume reset, not routine cleanup: it also
+removes Analysis-owned and still-within-grace-window unreferenced Assets
+that the two cleanup rules above would otherwise have preserved.
 
 ## Shutdown
 

@@ -1,5 +1,6 @@
 """M7-04 coverage for the structured diagnostic-event baseline and the
-remediated matching-stage raw-exception-message leak.
+remediated matching-stage raw-exception-message leak, extended by S0012
+with the `asset_orphan_cleanup_completed` cleanup-boundary event.
 
 `tests/test_local_executor_and_recovery.py` already exhaustively covers
 `LocalAnalysisExecutor`'s claim/run/persist behavior in isolation; this
@@ -37,6 +38,7 @@ from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository impo
 )
 from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
     cleanup_expired_assets,
+    cleanup_orphaned_assets,
 )
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
     LocalAnalysisExecutor,
@@ -403,6 +405,37 @@ def test_cleanup_pass_emits_one_count_only_event(
     assert cleanup_events[0]["analysis_id"] is None
 
 
+def test_orphan_cleanup_pass_emits_one_count_only_event(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage import (
+        LocalFilesystemAssetStorage,
+    )
+
+    database_path = tmp_path / "analyses.sqlite3"
+    storage_root = tmp_path / "assets"
+    storage_root.mkdir()
+    storage = LocalFilesystemAssetStorage(storage_root)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        with SQLiteAnalysisRepository(database_path) as repository:
+            report = cleanup_orphaned_assets(
+                repository,
+                storage,
+                now=datetime.now(timezone.utc),
+            )
+
+    events = _acl_events(caplog)
+    orphan_events = [
+        e for e in events if e["event"] == "asset_orphan_cleanup_completed"
+    ]
+    assert len(orphan_events) == 1
+    assert orphan_events[0]["boundary"] == "cleanup"
+    assert orphan_events[0]["outcome"] == "succeeded"
+    assert orphan_events[0]["count"] == len(report.deleted_asset_ids) == 0
+    assert orphan_events[0]["analysis_id"] is None
+
+
 # --- data minimization: no captured event leaks a path, payload, or secret --
 
 
@@ -413,6 +446,7 @@ def test_cleanup_pass_emits_one_count_only_event(
         ("executor", "analysis_execution_succeeded"),
         ("persistence", "analysis_persistence_write_failed"),
         ("cleanup", "asset_retention_cleanup_completed"),
+        ("cleanup", "asset_orphan_cleanup_completed"),
         ("api", "api_request_failed"),
     ],
 )

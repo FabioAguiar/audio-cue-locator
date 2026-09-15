@@ -1,4 +1,4 @@
-# Applied Retention and Cleanup Wiring (M7-03)
+# Applied Retention and Cleanup Wiring (M7-03, extended by S0012)
 
 ## Purpose and boundary
 
@@ -17,6 +17,13 @@ not perform" (M4-05). This document is that later integration step. It does
 not restate either mechanism's ownership model, eligibility rules, or retry
 policy -- consult the two documents above for those.
 
+S0012 extends the same applied wiring with a third startup-only phase,
+`cleanup_orphaned_assets` (also documented in
+[`docs/artifact-retention-and-cleanup-policy.md`](artifact-retention-and-cleanup-policy.md),
+"Orphan-upload cleanup (S0012)"), added immediately after the existing two
+calls and, like them, strictly before `LocalAnalysisExecutor` is
+constructed.
+
 ## Applied wiring order
 
 `interfaces/rest_api/app.py`'s `_build_analysis_use_cases` -- called once by
@@ -34,27 +41,40 @@ constructed:
 2. `cleanup_expired_assets(repository, storage)` -- deletes uniquely-owned,
    terminal, retention-eligible Asset bytes, using the existing default
    seven-day `MINIMUM_RETENTION_WINDOW` and no other override.
+3. `cleanup_orphaned_assets(repository, storage)` (S0012) -- deletes
+   physical Assets that remain unreferenced by every persisted Analysis
+   after the default 24-hour `ORPHAN_UPLOAD_GRACE_WINDOW`, using the S0012
+   local storage inventory and no other override.
 
-Recovery runs before cleanup so that an Analysis this process itself just
-resolved from `RUNNING` to `FAILED` is evaluated by cleanup with its fresh
-terminal timestamp -- it will not become cleanup-eligible until the
+Recovery runs before both cleanup phases so that an Analysis this process
+itself just resolved from `RUNNING` to `FAILED` is evaluated with its fresh
+terminal timestamp -- it will not become owned-retention-eligible until the
 seven-day window has independently elapsed from that resolution, not from
-whatever time it was originally left `RUNNING`. Reversing the order would
-not change which Assets are ultimately eligible (eligibility is timestamp-
-based, not order-based), but this is the order this issue applies and
-verifies.
+whatever time it was originally left `RUNNING`. Owned-retention cleanup runs
+before orphan cleanup so that orphan cleanup sees the physical inventory and
+every persisted reference exactly as they stand once owned cleanup has
+already applied its own, narrower deletions for this same process start;
+reversing the last two would not change which Assets are ultimately eligible
+under either policy (each policy's own eligibility is timestamp-based, not
+order-based, and the two use disjoint age signals), but this is the order
+this issue applies and verifies. Executor construction happens only after
+all three complete, so no code path in this process can claim a `QUEUED`
+Analysis before startup maintenance has already finished.
 
 ## Startup-only trigger decision
 
-Neither call is wired to a periodic, per-request, or otherwise recurring
-trigger. Both run exactly once, at composition-root build time, per process
-start. This is the smallest viable mechanism consistent with this
-local-first, single-process runtime having no existing background-scheduler
-mechanism, and it avoids adding synchronous repository/storage I/O latency
-to any request path. An operator who needs cleanup to also run between
-process restarts (for a long-lived process that is never restarted) must
-restart the process, or a future issue must add an explicit, separately
-justified periodic mechanism; this issue does not add one.
+None of the three calls is wired to a periodic, per-request, or otherwise
+recurring trigger. All three run exactly once, at composition-root build
+time, per process start. This is the smallest viable mechanism consistent
+with this local-first, single-process runtime having no existing
+background-scheduler mechanism, and it avoids adding synchronous
+repository/storage I/O latency to any request path. An operator who needs
+cleanup to also run between process restarts (for a long-lived process that
+is never restarted) must restart the process, or a future issue must add an
+explicit, separately justified periodic mechanism; S0012, like M7-03 before
+it, does not add one -- that evaluation, including any concurrency
+coordination required to run cleanup safely while requests are active, is
+left to S0011.
 
 ## Recorded scope decision: Analysis Result durability stays out of scope
 
@@ -141,3 +161,16 @@ storage; introduce a periodic or per-request cleanup trigger; introduce
 object storage, a broker, or distributed garbage collection; or add
 environment isolation to `tests/test_api_errors.py` or
 `tests/test_api_v1_contracts.py`.
+
+## S0012 addendum: orphan cleanup added to the same wiring
+
+S0012 adds `cleanup_orphaned_assets` as the fixed wiring's third phase (see
+"Applied wiring order" above) and does not otherwise revisit this document's
+M7-03 conclusions: the startup-only trigger decision, the recorded Analysis
+Result durability scope decision, the `.gitignore` fix, and the operational
+caution about composition-root construction no longer being inert all
+continue to apply unchanged, and now also cover `cleanup_orphaned_assets`'s
+own storage/repository I/O. S0012 does not modify `retention_policy.py`'s
+existing `cleanup_expired_assets` behavior, does not add a periodic or
+per-request trigger for either cleanup phase, and does not add environment
+isolation beyond what M7-03 already established.

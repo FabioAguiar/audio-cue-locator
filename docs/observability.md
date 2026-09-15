@@ -84,6 +84,7 @@ required.
 | `media_processing` | `application/create_analysis.py`, `CreateAnalysisUseCase.create` | `media_canonicalization_failed` for any other pre-persistence Asset resolution/probing/decoding/canonicalization failure; no `analysis_id` is available here, since every rejection happens before an Analysis is ever persisted. |
 | `persistence` | `infrastructure/analysis_repository/sqlite_repository.py`, `create`/`add_owned_asset`/`transition` | `analysis_persistence_write_failed`, emitted only for a genuinely unexpected exception -- an already-existing/missing/invalid-record/rejected-transition outcome is excluded, since those are ordinary business-rule rejections, not persistence-layer failures. |
 | `cleanup` | `infrastructure/asset_storage/retention_policy.py`, `cleanup_expired_assets` | `asset_retention_cleanup_completed`, once per pass, carrying only `count` (the number of Assets actually deleted). |
+| `cleanup` | `infrastructure/asset_storage/retention_policy.py`, `cleanup_orphaned_assets` (S0012) | `asset_orphan_cleanup_completed`, once per pass, carrying only `count` (the number of physical Assets actually deleted). Its only S0012-specific magnitude is `count`; it never carries an Asset identifier, filename, storage path, checksum, media type, or file-size list -- broader storage-size observability belongs to S0011. |
 
 `application`'s own pre-persistence Cue-validation event
 (`cue_validation_failed`, above) never logs `cue_id`, `label`, either trim

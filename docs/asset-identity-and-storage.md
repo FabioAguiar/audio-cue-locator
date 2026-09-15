@@ -81,17 +81,62 @@ filename or extension.
 
 ## Application-facing port
 
-`AssetStoragePort` exposes only:
+`AssetStoragePort` exposes:
 
 - `ingest(content, *, logical_type, informative_name, detected_media_type)`,
   which stores bytes under a generated identifier and returns the complete
   `Asset` metadata;
-- `read(identifier)`, which resolves bytes by internal identifier.
+- `read(identifier)`, which resolves bytes by internal identifier;
+- `delete(identifier)`, which removes bytes by internal identifier and
+  returns whether bytes were actually removed (see
+  [`docs/artifact-retention-and-cleanup-policy.md`](artifact-retention-and-cleanup-policy.md));
+- `list_entries()` (S0012), which returns a read-only inventory of every
+  managed physical Asset this storage currently holds.
 
-There is deliberately no destination-path parameter. Python structural typing
-allows Application to accept this port and a test double without depending on
-the concrete Infrastructure class. `LocalFilesystemAssetStorage` explicitly
+There is deliberately no destination-path parameter, and `list_entries()`
+exposes no filesystem path either. Python structural typing allows
+Application to accept this port and a test double without depending on the
+concrete Infrastructure class. `LocalFilesystemAssetStorage` explicitly
 implements the protocol.
+
+### Storage inventory metadata (S0012)
+
+`list_entries()` returns a tuple of `AssetStorageEntry` values, each carrying
+exactly:
+
+| Field | Type and meaning |
+|---|---|
+| `identifier` | The same canonical Asset identifier `ingest` returned. |
+| `size_bytes` | The exact byte count of the stored file, from `stat()`. |
+| `stored_at` | A timezone-aware datetime describing when the adapter's own storage mechanism last wrote this entry. |
+
+`stored_at` is storage inventory metadata only. It is not Asset identity, it
+is never a public REST field, and it is not interchangeable with an Analysis
+lifecycle timestamp: `docs/artifact-retention-and-cleanup-policy.md`'s
+seven-day Analysis-owned retention window continues to derive its age
+exclusively from `lifecycle_timestamps`, never from this inventory. The one
+place `stored_at` is used for an eligibility decision is the separate S0012
+orphan-upload grace window, documented in
+[`docs/artifact-retention-and-cleanup-policy.md`](artifact-retention-and-cleanup-policy.md).
+
+`LocalFilesystemAssetStorage.list_entries()` enumerates only direct children
+of the configured storage root, and only those that are managed Assets:
+
+- a missing storage root returns an empty tuple, not an error;
+- a direct, regular file whose name is a canonical lowercase UUID is a
+  managed entry, with `stored_at` taken from `stat().st_mtime` converted to
+  timezone-aware UTC;
+- a symbolic link is never followed and never returned, even when its name
+  is a canonical UUID;
+- a directory is never returned;
+- a non-canonical/non-UUID filename is never returned;
+- enumeration never recurses below the configured root.
+
+Because the local adapter is write-once -- `ingest` uses exclusive creation,
+`read` never mutates a file, and `delete` only unlinks -- `st_mtime` is a
+safe, already-available age signal for this adapter: nothing in this
+adapter's own supported operations ever rewrites an existing file in place,
+so inventorying a file never changes its `stored_at`.
 
 ## Local filesystem adapter
 
@@ -149,7 +194,11 @@ The separate ASF test phase should cover at least:
 - missing-asset behavior and exclusive-write collision handling;
 - runtime conformance of `LocalFilesystemAssetStorage` to `AssetStoragePort`;
 - dependency review proving Core has no filesystem dependency and Application
-  can consume the port without importing the concrete adapter.
+  can consume the port without importing the concrete adapter;
+- (S0012) inventory coverage: empty/missing-root inventory, ingested Assets
+  appearing with a canonical identifier and exact size, a timezone-aware
+  `stored_at` that a `read` never mutates, deterministic ordering, and
+  exclusion of directories, symlinks, and non-UUID unmanaged files.
 
 No deployment, Docker, database, broker, distributed worker, or remote storage
 change is required for this implementation.

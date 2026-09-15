@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
@@ -197,6 +198,43 @@ class Asset:
             )
 
 
+@dataclass(frozen=True)
+class AssetStorageEntry:
+    """Storage-agnostic inventory metadata for one managed physical Asset (S0012).
+
+    Exposes exactly the canonical Asset identifier, its exact byte size, and a
+    timezone-aware storage timestamp -- never a filesystem path, filename,
+    directory, ``mtime_ns``, or inode.  ``stored_at`` is storage inventory
+    metadata only: it is not Asset identity and it is never a public REST
+    field.  An adapter's own age signal (for example the local adapter's
+    write-once ``st_mtime``) is Infrastructure detail; Core only requires the
+    value to be timezone-aware.
+    """
+
+    identifier: str
+    size_bytes: int
+    stored_at: datetime
+
+    def __post_init__(self) -> None:
+        validate_asset_identifier(self.identifier)
+        if (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or self.size_bytes < 0
+        ):
+            raise InvalidAssetMetadataError(
+                "AssetStorageEntry size_bytes must be a non-negative integer"
+            )
+        if (
+            not isinstance(self.stored_at, datetime)
+            or self.stored_at.tzinfo is None
+            or self.stored_at.utcoffset() is None
+        ):
+            raise InvalidAssetMetadataError(
+                "AssetStorageEntry stored_at must be a timezone-aware datetime"
+            )
+
+
 @runtime_checkable
 class AssetStoragePort(Protocol):
     """Application-facing port for ingesting, resolving, and deleting bytes.
@@ -228,6 +266,20 @@ class AssetStoragePort(Protocol):
         Return ``True`` when bytes were removed and ``False`` when the
         identifier was already absent.  Implementations must apply the same
         identifier and storage-boundary checks used by ``read``.
+        """
+
+        ...
+
+    def list_entries(self) -> tuple[AssetStorageEntry, ...]:
+        """Return inventory metadata for every managed physical Asset (S0012).
+
+        Exposes no filesystem path.  Implementations enumerate only direct,
+        regular, canonical-UUID-named files they manage: symbolic links,
+        directories, and unmanaged/non-UUID entries are never included, and
+        enumeration never recurses below the configured storage root.  A
+        missing storage root returns an empty tuple rather than raising.
+        Read-only: calling this must never mutate any entry's ``stored_at``.
+        Ordering is deterministic (ascending identifier).
         """
 
         ...

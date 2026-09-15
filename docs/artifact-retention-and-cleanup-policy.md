@@ -9,14 +9,23 @@ Analysis metadata. It introduces no filesystem-derived identity, direct SQL in
 Application, remote storage, broker, distributed worker, or deployment
 scheduler.
 
+S0012 adds a second, separate policy in the same module: orphan-upload
+cleanup for physical Assets that were never referenced by any persisted
+Analysis at all. The two policies answer different questions and use
+different age signals -- see "Orphan-upload cleanup (S0012)" below -- and
+this document keeps them clearly distinguished throughout.
+
 The executable behavior is split across the established ports:
 
 - `AnalysisRepositoryPort` is the only source of Analysis state, lifecycle
   timestamps, and Asset ownership references.
 - `AssetStoragePort.delete(identifier)` is the only deletion boundary.
+- `AssetStoragePort.list_entries()` (S0012) is the only physical-inventory
+  boundary; it exposes identifier, size, and a timezone-aware `stored_at`,
+  never a filesystem path.
 - `LocalFilesystemAssetStorage` alone resolves an Asset identifier to a local
   path and applies identifier, symlink, and root-containment checks.
-- `infrastructure/asset_storage/retention_policy.py` coordinates the two ports;
+- `infrastructure/asset_storage/retention_policy.py` coordinates these ports;
   it performs no SQL and imports no filesystem API.
 
 ## Ownership model
@@ -46,8 +55,10 @@ must therefore record the identifier before its terminal transition.
 
 There is an unavoidable failure interval between storing new bytes and
 recording their ownership. If a process fails in that interval, the bytes are
-orphaned. Discovering those bytes is outside this issue because
-`AssetStoragePort` deliberately exposes no storage-enumeration operation.
+orphaned. `AssetStoragePort.list_entries()` (S0012) closes the discovery gap
+this document originally left open here -- see "Orphan-upload cleanup
+(S0012)" below for the separate, conservative policy that governs those
+bytes.
 
 ## Minimum retention window
 
@@ -100,18 +111,84 @@ absent, making a cleanup pass safely retryable. Missing bytes are reported
 separately and are not claimed as successful deletions. Storage errors remain
 explicit rather than being converted into success.
 
+## Orphan-upload cleanup (S0012)
+
+The current upload workflow persists source/Cue bytes before an Analysis
+exists (`POST /assets/... ` then, later, `POST /analyses`). If Analysis
+creation fails, the browser closes, or `/analyses` is never called, those
+already-persisted bytes have zero Analysis references and the policy above
+cannot discover them: its candidate set begins exclusively from persisted
+`AnalysisRecord` references, so a physical Asset nothing ever referenced is
+invisible to it, at any age.
+
+`cleanup_orphaned_assets(repository, storage, *, now=None, grace_window=
+ORPHAN_UPLOAD_GRACE_WINDOW)` closes that gap with a separate, conservative
+rule:
+
+1. every persisted Analysis is enumerated across every lifecycle state
+   (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`) to build one reference set
+   from `source_asset_id`, every Cue `asset_id`, and every `owned_asset_id`;
+2. `AssetStoragePort.list_entries()` enumerates every managed physical Asset;
+3. an Asset referenced by any persisted Analysis, in any state, is preserved
+   regardless of age -- old age never overrides an existing reference;
+4. an unreferenced Asset younger than `ORPHAN_UPLOAD_GRACE_WINDOW`
+   (**24 complete hours**, the documented minimum) is preserved as normal
+   staging behavior for the ordinary upload-then-create-Analysis flow;
+5. an unreferenced Asset that is at least 24 complete hours old is a
+   deletion candidate;
+6. references are refreshed immediately before each deletion, exactly like
+   `cleanup_expired_assets`'s own pre-delete refresh: if the candidate is now
+   referenced, it is preserved instead of deleted.
+
+`ORPHAN_UPLOAD_GRACE_WINDOW` age comes exclusively from the S0012 local
+storage inventory's own `stored_at` signal (the local adapter's write-once
+`st_mtime`). It is never derived from, and never substitutes for, an
+Analysis lifecycle timestamp. A longer grace window may be supplied for
+tests or future composition, but a shorter one is rejected -- exactly the
+same "may lengthen, never shorten" discipline `MINIMUM_RETENTION_WINDOW`
+already applies to `cleanup_expired_assets`.
+
+A future-dated or otherwise malformed `stored_at` (clock skew, an
+inconsistent adapter) is never clamped backward: `cleanup_orphaned_assets`
+fails closed and preserves the Asset. Deletion is requested only through
+`AssetStoragePort.delete`, using the same idempotent, missing-vs-deleted
+reporting `cleanup_expired_assets` already uses.
+
+This is intentionally the *only* difference between the two policies. Every
+other invariant above -- SQL-free coordination through the two ports,
+conservative preserve-on-ambiguity, no repair of referenced-but-missing
+records, no deletion of Analysis rows -- applies identically to orphan
+cleanup.
+
+### Two policies, two age signals
+
+| | `cleanup_expired_assets` | `cleanup_orphaned_assets` (S0012) |
+|---|---|---|
+| Governs | Assets owned by a terminal Analysis | Assets never referenced by any Analysis |
+| Age signal | `lifecycle_timestamps` terminal timestamp | Local storage inventory `stored_at` |
+| Minimum window | 7 complete days | 24 complete hours |
+| Reference scope | Exactly one owning Analysis | Any Analysis, any state |
+
+Orphan age never substitutes for, shortens, or otherwise influences the
+seven-day Analysis-owned terminal retention window, and vice versa. An
+Asset that becomes Analysis-referenced before its 24-hour orphan grace
+elapses is thereafter governed exclusively by the terminal-retention policy
+above, never by orphan age again.
+
 ## Known limitations
 
-- Orphaned bytes with no persisted Analysis reference cannot be discovered or
-  cleaned up.
 - No derived-artifact ingestion pipeline is added. The ownership contract
   applies as and when such an Asset is persisted and linked.
 - No durable Result store is added; result retention is prospective.
-- Cleanup is an independently callable local routine. Scheduling or startup
-  wiring is a later integration decision.
+- Both cleanup passes are startup-only local routines
+  (`docs/retention-and-cleanup.md`); periodic/background execution is a
+  later, separately authorized decision (S0011).
 - Analysis records are not deleted or rewritten when their Asset bytes are
   removed. A repeated cleanup therefore reports already-missing bytes rather
   than claiming another deletion.
+- An upload that remains unreferenced for at least 24 hours is no longer
+  guaranteed to remain available for a later Analysis-creation attempt; this
+  is accepted staging behavior, not an error condition.
 
 ## Validation expectations
 
@@ -125,7 +202,12 @@ The separate ASF test phase should cover:
   records, missing timestamps, and rejection of a shorter window;
 - shared identifiers across different Analyses and a reference change detected
   by the immediate pre-delete refresh;
-- missing-byte reporting without a false successful-deletion claim.
+- missing-byte reporting without a false successful-deletion claim;
+- (S0012) the exact 24-hour orphan boundary, a 23h59m59s-old unreferenced
+  Asset staying preserved, references from every lifecycle state protecting
+  bytes, a future-dated entry staying preserved, a reference introduced by
+  the immediate pre-delete refresh preserving the candidate, and rejection of
+  a grace window shorter than 24 hours.
 
 No deployment, Docker, runtime-volume, remote-storage, broker, REST, WebUI, or
 GitHub change is required.

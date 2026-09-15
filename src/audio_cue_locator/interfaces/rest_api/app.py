@@ -114,6 +114,7 @@ from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage imp
 )
 from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
     cleanup_expired_assets,
+    cleanup_orphaned_assets,
 )
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
     DEFAULT_MAX_CONCURRENCY,
@@ -399,16 +400,20 @@ def _build_analysis_use_cases(
     reads that same body through its Application-owned reader Protocol.
 
     Before the executor is constructed, this composition root runs the
-    M4-05/M4-06 startup lifecycle exactly once: ``run_startup_recovery``
+    M4-05/M4-06/S0012 startup lifecycle exactly once: ``run_startup_recovery``
     resolves any Analysis left ``RUNNING`` by a prior crash to ``FAILED``,
     strictly before any ``QUEUED`` Analysis can be claimed (M7-03,
     preserving the exactly-once-before-any-claim precondition documented in
     `docs/restart-and-recovery-policy.md`); ``cleanup_expired_assets`` then
     deletes uniquely-owned, terminal, retention-eligible Asset bytes using
-    its existing default seven-day minimum window. Neither call is wired to
-    a periodic trigger: this local-first, single-process runtime has no
-    background-scheduler mechanism, so both run once per process start
-    (`docs/retention-and-cleanup.md`).
+    its existing default seven-day minimum window; ``cleanup_orphaned_assets``
+    (S0012) then deletes physical Assets that remain unreferenced by every
+    persisted Analysis after the S0012 24-hour grace window, using the
+    physical inventory and every persisted reference left standing once
+    owned-retention cleanup has already run. None of the three calls is
+    wired to a periodic trigger: this local-first, single-process runtime
+    has no background-scheduler mechanism, so all three run once per
+    process start (`docs/retention-and-cleanup.md`).
     """
 
     db_path = _analysis_db_path()
@@ -416,6 +421,7 @@ def _build_analysis_use_cases(
     repository = _ThreadLocalAnalysisRepository(db_path)
     run_startup_recovery(repository)
     cleanup_expired_assets(repository, storage)
+    cleanup_orphaned_assets(repository, storage)
     result_store = InMemoryResultReferenceStore()
     executor = LocalAnalysisExecutor(
         repository, result_store=result_store, max_concurrency=_max_concurrency()

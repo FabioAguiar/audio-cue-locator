@@ -9,12 +9,14 @@ containment checks happen before any operation on an identifier-derived path.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 from audio_cue_locator.core.asset import (
     Asset,
     AssetNotFoundError,
     AssetStorageCollisionError,
+    AssetStorageEntry,
     AssetStoragePort,
     AssetType,
     InvalidAssetIdentifierError,
@@ -115,6 +117,43 @@ class LocalFilesystemAssetStorage(AssetStoragePort):
         except FileNotFoundError:
             return False
         return True
+
+    def list_entries(self) -> tuple[AssetStorageEntry, ...]:
+        """Return inventory metadata for every managed direct child file (S0012).
+
+        Enumeration never recurses below the configured root.  A symlink,
+        directory, or non-canonical-UUID filename is never treated as a
+        managed entry.  Nothing here reads, writes, or touches file content,
+        so ``stat().st_mtime`` -- the write-once local adapter's only age
+        signal (bytes are exclusively created, read, or unlinked; nothing
+        rewrites them in place) -- is never disturbed by inventory itself.
+        """
+
+        if not self._base_directory.is_dir():
+            return ()
+
+        entries: list[AssetStorageEntry] = []
+        for child in self._base_directory.iterdir():
+            if child.is_symlink():
+                continue
+            try:
+                identifier = validate_asset_identifier(child.name)
+            except InvalidAssetIdentifierError:
+                continue
+            if not child.is_file():
+                continue
+            stat_result = child.stat()
+            entries.append(
+                AssetStorageEntry(
+                    identifier=identifier,
+                    size_bytes=stat_result.st_size,
+                    stored_at=datetime.fromtimestamp(
+                        stat_result.st_mtime, tz=timezone.utc
+                    ),
+                )
+            )
+        entries.sort(key=lambda entry: entry.identifier)
+        return tuple(entries)
 
     def _path_for(self, identifier: str) -> Path:
         """Resolve a validated identifier beneath the configured root.

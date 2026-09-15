@@ -1,19 +1,21 @@
 """Integrated M7-03 coverage for the applied composition-root wiring of
-M4-05's `run_startup_recovery` and M4-06's `cleanup_expired_assets`.
+M4-05's `run_startup_recovery` and M4-06's `cleanup_expired_assets`, extended
+by S0012 with the third `cleanup_orphaned_assets` startup phase.
 
 `tests/test_local_executor_and_recovery.py` and `tests/test_artifact_retention.py`
-already exhaustively cover both mechanisms' own eligibility, isolation, and
-recovery rules in isolation, against hand-built or directly-constructed
+already exhaustively cover all three mechanisms' own eligibility, isolation,
+and recovery rules in isolation, against hand-built or directly-constructed
 repository/storage pairs. This suite does not duplicate that coverage. It
 instead exercises the actual wiring `docs/retention-and-cleanup.md` and
 `interfaces/rest_api/app.py`'s `_build_analysis_use_cases` describe --
-`run_startup_recovery` then `cleanup_expired_assets`, called once at
-composition-root build time, strictly before `LocalAnalysisExecutor` is
-constructed -- confirming the wiring itself, not the underlying functions,
-is correct: recovery-before-claim ordering, applied restart recovery,
-applied cross-Analysis-isolated cleanup across success/failure/timeout
-terminal categories, and safety across a repeated ("restarted twice")
-composition-root build.
+`run_startup_recovery`, then `cleanup_expired_assets`, then (S0012)
+`cleanup_orphaned_assets`, called once at composition-root build time,
+strictly before `LocalAnalysisExecutor` is constructed -- confirming the
+wiring itself, not the underlying functions, is correct: recovery-before-
+claim ordering, applied restart recovery, applied cross-Analysis-isolated
+cleanup across success/failure/timeout terminal categories, applied orphan
+cleanup across old/recent/referenced physical Assets, and safety across a
+repeated ("restarted twice") composition-root build.
 
 Every test isolates `AUDIO_CUE_LOCATOR_ANALYSIS_DB_PATH` and
 `AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT` under `tmp_path`, mirroring every
@@ -28,6 +30,7 @@ inert.
 from __future__ import annotations
 
 import importlib
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -400,6 +403,138 @@ def test_repeated_composition_root_construction_is_idempotent(
 
 
 # --- the actual production entrypoint, end-to-end ---------------------------
+
+
+def test_recovery_and_both_cleanup_phases_run_before_executor_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0012 extends the fixed startup order with a third maintenance phase:
+    recovery, then owned-retention cleanup, then orphan cleanup, all strictly
+    before `LocalAnalysisExecutor` is constructed."""
+
+    _isolate_env(monkeypatch, tmp_path)
+    order: list[str] = []
+    real_run_startup_recovery = app_module.run_startup_recovery
+    real_cleanup_expired_assets = app_module.cleanup_expired_assets
+    real_cleanup_orphaned_assets = app_module.cleanup_orphaned_assets
+    real_executor_cls = app_module.LocalAnalysisExecutor
+
+    def _recording_recovery(repository, **kwargs):
+        order.append("recovery")
+        return real_run_startup_recovery(repository, **kwargs)
+
+    def _recording_owned_cleanup(repository, storage, **kwargs):
+        order.append("owned_retention_cleanup")
+        return real_cleanup_expired_assets(repository, storage, **kwargs)
+
+    def _recording_orphan_cleanup(repository, storage, **kwargs):
+        order.append("orphan_cleanup")
+        return real_cleanup_orphaned_assets(repository, storage, **kwargs)
+
+    class _RecordingExecutor(real_executor_cls):
+        def __init__(self, *args, **kwargs):
+            order.append("executor_constructed")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "run_startup_recovery", _recording_recovery)
+    monkeypatch.setattr(app_module, "cleanup_expired_assets", _recording_owned_cleanup)
+    monkeypatch.setattr(app_module, "cleanup_orphaned_assets", _recording_orphan_cleanup)
+    monkeypatch.setattr(app_module, "LocalAnalysisExecutor", _RecordingExecutor)
+
+    storage = app_module._build_asset_storage()
+    create_use_case, _ = app_module._build_analysis_use_cases(storage)
+    try:
+        assert order == [
+            "recovery",
+            "owned_retention_cleanup",
+            "orphan_cleanup",
+            "executor_constructed",
+        ]
+    finally:
+        _shutdown(create_use_case)
+
+
+# --- applied orphan cleanup, through the wired composition root -------------
+
+
+def test_composition_root_deletes_old_unreferenced_and_preserves_recent_and_referenced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    db_path, storage_root = _isolate_env(monkeypatch, tmp_path)
+    storage = LocalFilesystemAssetStorage(storage_root)
+
+    old_orphan = storage.ingest(
+        b"old unreferenced upload",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="old-orphan.wav",
+        detected_media_type="audio/wav",
+    )
+    recent_orphan = storage.ingest(
+        b"recent unreferenced upload",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="recent-orphan.wav",
+        detected_media_type="audio/wav",
+    )
+    referenced_source = storage.ingest(
+        b"referenced source",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="referenced.wav",
+        detected_media_type="audio/wav",
+    )
+
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=25)).timestamp()
+    os.utime(
+        storage_root / old_orphan.identifier, (old_timestamp, old_timestamp)
+    )
+
+    with SQLiteAnalysisRepository(db_path) as repository:
+        repository.create(
+            analysis_id="still-queued",
+            source_asset_id=referenced_source.identifier,
+            cues=(CueAssetReference(cue_id="cue", asset_id=_asset_id()),),
+            effective_configuration=_configuration(),
+            queued_at=datetime.now(timezone.utc),
+        )
+
+    create_use_case, _ = app_module._build_analysis_use_cases(storage)
+    try:
+        with pytest.raises(AssetNotFoundError):
+            storage.read(old_orphan.identifier)
+        assert storage.read(recent_orphan.identifier) == b"recent unreferenced upload"
+        assert storage.read(referenced_source.identifier) == b"referenced source"
+    finally:
+        _shutdown(create_use_case)
+
+
+def test_repeated_startup_orphan_cleanup_is_retry_safe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    db_path, storage_root = _isolate_env(monkeypatch, tmp_path)
+    storage = LocalFilesystemAssetStorage(storage_root)
+
+    old_orphan = storage.ingest(
+        b"old unreferenced upload",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="old-orphan.wav",
+        detected_media_type="audio/wav",
+    )
+    old_timestamp = (datetime.now(timezone.utc) - timedelta(hours=25)).timestamp()
+    os.utime(
+        storage_root / old_orphan.identifier, (old_timestamp, old_timestamp)
+    )
+
+    first_create_use_case, _ = app_module._build_analysis_use_cases(storage)
+    try:
+        with pytest.raises(AssetNotFoundError):
+            storage.read(old_orphan.identifier)
+    finally:
+        _shutdown(first_create_use_case)
+
+    # Second "process start": the already-deleted upload is simply absent
+    # from the inventory, so cleanup has nothing left to reconsider; neither
+    # call raises.
+    second_create_use_case, _ = app_module._build_analysis_use_cases(storage)
+    _shutdown(second_create_use_case)
 
 
 def test_create_app_applies_recovery_and_cleanup_together(

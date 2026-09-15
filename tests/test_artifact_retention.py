@@ -1,5 +1,7 @@
-"""Focused M4-06 coverage for retention eligibility and isolation."""
+"""Focused M4-06 coverage for retention eligibility and isolation, extended
+by S0012 with a separate orphan-upload cleanup pass."""
 
+import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -19,7 +21,7 @@ from audio_cue_locator.core.analysis_result import (
     NormalizationSnapshot,
     StructuredError,
 )
-from audio_cue_locator.core.asset import AssetNotFoundError, AssetType
+from audio_cue_locator.core.asset import AssetNotFoundError, AssetStorageEntry, AssetType
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
     SQLiteAnalysisRepository,
 )
@@ -28,8 +30,10 @@ from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage imp
 )
 from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
     MINIMUM_RETENTION_WINDOW,
+    ORPHAN_UPLOAD_GRACE_WINDOW,
     InvalidRetentionPolicyError,
     cleanup_expired_assets,
+    cleanup_orphaned_assets,
 )
 
 NOW = datetime(2026, 1, 15, tzinfo=timezone.utc)
@@ -367,3 +371,241 @@ def test_real_adapters_isolate_cleanup_between_simultaneously_persisted_owners(
         protected_source.identifier,
         shared_cue.identifier,
     }
+
+
+# --- S0012: orphan-upload cleanup -------------------------------------------
+
+
+class _OrphanStorage:
+    """A minimal `AssetStoragePort` test double exposing only the two
+    operations `cleanup_orphaned_assets` uses: `list_entries` (a fixed,
+    caller-supplied inventory) and `delete`."""
+
+    def __init__(
+        self, entries: tuple[AssetStorageEntry, ...], *, missing: frozenset[str] = frozenset()
+    ) -> None:
+        self._entries = entries
+        self._missing = set(missing)
+        self.delete_calls: list[str] = []
+
+    def list_entries(self) -> tuple[AssetStorageEntry, ...]:
+        return self._entries
+
+    def delete(self, identifier: str) -> bool:
+        self.delete_calls.append(identifier)
+        if identifier in self._missing:
+            return False
+        self._missing.add(identifier)
+        return True
+
+
+def _entry(asset_id: str, *, stored_at: datetime, size_bytes: int = 1) -> AssetStorageEntry:
+    return AssetStorageEntry(identifier=asset_id, size_bytes=size_bytes, stored_at=stored_at)
+
+
+def test_orphan_grace_window_is_twenty_four_hours():
+    assert ORPHAN_UPLOAD_GRACE_WINDOW == timedelta(hours=24)
+
+
+def test_old_unreferenced_asset_is_deleted():
+    asset_id = _asset_id()
+    storage = _OrphanStorage((_entry(asset_id, stored_at=NOW - timedelta(hours=25)),))
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == (asset_id,)
+    assert report.preserved_referenced_asset_ids == ()
+    assert report.preserved_recent_asset_ids == ()
+
+
+def test_exact_twenty_four_hour_boundary_is_deleted():
+    asset_id = _asset_id()
+    storage = _OrphanStorage(
+        (_entry(asset_id, stored_at=NOW - ORPHAN_UPLOAD_GRACE_WINDOW),)
+    )
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == (asset_id,)
+
+
+def test_just_under_twenty_four_hours_is_preserved():
+    asset_id = _asset_id()
+    storage = _OrphanStorage(
+        (
+            _entry(
+                asset_id,
+                stored_at=NOW - ORPHAN_UPLOAD_GRACE_WINDOW + timedelta(seconds=1),
+            ),
+        )
+    )
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert report.preserved_recent_asset_ids == (asset_id,)
+    assert storage.delete_calls == []
+
+
+def test_referenced_old_asset_is_preserved_regardless_of_age():
+    record = _record(
+        "active",
+        AnalysisLifecycleState.QUEUED,
+    )
+    storage = _OrphanStorage(
+        (_entry(record.source_asset_id, stored_at=NOW - timedelta(days=365)),)
+    )
+
+    report = cleanup_orphaned_assets(_Repository((record,)), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert report.preserved_referenced_asset_ids == (record.source_asset_id,)
+    assert storage.delete_calls == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        AnalysisLifecycleState.QUEUED,
+        AnalysisLifecycleState.RUNNING,
+        AnalysisLifecycleState.SUCCEEDED,
+        AnalysisLifecycleState.FAILED,
+    ],
+)
+def test_reference_from_every_lifecycle_state_protects_bytes(
+    state: AnalysisLifecycleState,
+):
+    record = _record("analysis", state, terminal_at=NOW - timedelta(days=365))
+    storage = _OrphanStorage(
+        (_entry(record.source_asset_id, stored_at=NOW - timedelta(days=365)),)
+    )
+
+    report = cleanup_orphaned_assets(_Repository((record,)), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert record.source_asset_id in report.preserved_referenced_asset_ids
+
+
+def test_source_cue_and_owned_asset_ids_all_count_as_references():
+    owned_asset_id = _asset_id()
+    record = _record("analysis", AnalysisLifecycleState.QUEUED, owned_asset_ids=(owned_asset_id,))
+    old = NOW - timedelta(days=2)
+    storage = _OrphanStorage(
+        (
+            _entry(record.source_asset_id, stored_at=old),
+            _entry(record.cues[0].asset_id, stored_at=old),
+            _entry(owned_asset_id, stored_at=old),
+        )
+    )
+
+    report = cleanup_orphaned_assets(_Repository((record,)), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert set(report.preserved_referenced_asset_ids) == {
+        record.source_asset_id,
+        record.cues[0].asset_id,
+        owned_asset_id,
+    }
+
+
+def test_future_dated_entry_is_preserved():
+    asset_id = _asset_id()
+    storage = _OrphanStorage((_entry(asset_id, stored_at=NOW + timedelta(hours=1)),))
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert asset_id in report.preserved_recent_asset_ids
+    assert storage.delete_calls == []
+
+
+def test_reference_introduced_by_pre_delete_refresh_preserves_candidate():
+    asset_id = _asset_id()
+    new_owner = _record("new-owner", AnalysisLifecycleState.QUEUED, source_asset_id=asset_id)
+
+    class ChangingRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_by_state(self, state: AnalysisLifecycleState) -> tuple[AnalysisRecord, ...]:
+            records = () if self.calls < 4 else (new_owner,)
+            self.calls += 1
+            return tuple(record for record in records if record.state is state)
+
+    storage = _OrphanStorage((_entry(asset_id, stored_at=NOW - timedelta(hours=25)),))
+
+    report = cleanup_orphaned_assets(ChangingRepository(), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert asset_id in report.preserved_referenced_asset_ids
+    assert storage.delete_calls == []
+
+
+def test_multiple_old_orphans_produce_a_deterministic_deletion_report():
+    first, second = sorted((_asset_id(), _asset_id()))
+    old = NOW - timedelta(hours=48)
+    storage = _OrphanStorage((_entry(first, stored_at=old), _entry(second, stored_at=old)))
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == (first, second)
+
+
+def test_storage_delete_false_is_reported_without_claiming_deletion():
+    asset_id = _asset_id()
+    storage = _OrphanStorage(
+        (_entry(asset_id, stored_at=NOW - timedelta(hours=25)),),
+        missing=frozenset({asset_id}),
+    )
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == ()
+    assert report.missing_asset_ids == (asset_id,)
+
+
+def test_orphan_grace_window_cannot_be_shorter_than_twenty_four_hours():
+    with pytest.raises(InvalidRetentionPolicyError):
+        cleanup_orphaned_assets(
+            _Repository(()),
+            _OrphanStorage(()),
+            now=NOW,
+            grace_window=ORPHAN_UPLOAD_GRACE_WINDOW - timedelta(microseconds=1),
+        )
+
+
+def test_orphan_cleanup_requires_timezone_aware_now():
+    with pytest.raises(InvalidRetentionPolicyError):
+        cleanup_orphaned_assets(
+            _Repository(()),
+            _OrphanStorage(()),
+            now=datetime(2026, 1, 15),
+        )
+
+
+def test_orphan_cleanup_real_adapters_preserve_recent_and_delete_old(tmp_path):
+    storage_root = tmp_path / "assets"
+    storage = LocalFilesystemAssetStorage(storage_root)
+    old_asset = storage.ingest(
+        b"old orphan",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="old.wav",
+        detected_media_type="audio/wav",
+    )
+    recent_asset = storage.ingest(
+        b"recent upload",
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="recent.wav",
+        detected_media_type="audio/wav",
+    )
+    old_timestamp = (NOW - timedelta(hours=25)).timestamp()
+    os.utime(storage_root / old_asset.identifier, (old_timestamp, old_timestamp))
+
+    with SQLiteAnalysisRepository(tmp_path / "analyses.sqlite") as repository:
+        report = cleanup_orphaned_assets(repository, storage, now=NOW)
+
+    assert report.deleted_asset_ids == (old_asset.identifier,)
+    assert recent_asset.identifier in report.preserved_recent_asset_ids
+    with pytest.raises(AssetNotFoundError):
+        storage.read(old_asset.identifier)
+    assert storage.read(recent_asset.identifier) == b"recent upload"
