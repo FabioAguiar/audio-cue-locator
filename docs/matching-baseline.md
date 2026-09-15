@@ -153,6 +153,16 @@ para uma etapa posterior do milestone M2.
   representativa — pré-requisito herdado de M1/M2-01, pendente e não
   resolvido por este documento.
 
+## Compatibilidade e reutilização em S0009
+
+`match_cue` continua sendo a interface histórica single-best de
+`normalized_cross_correlation_v1`: máximo global, primeiro lag em empate e
+cardinalidade `0..1`. O cálculo vetorial foi extraído para o helper interno
+`_normalized_correlation_scores`, preservando float64, modo `valid`, score
+zero para cue/janela silenciosa e clip `[-1, 1]`. O novo módulo
+`multi_occurrence.py` reutiliza esse helper; ele não duplica nem altera a
+fórmula numérica histórica.
+
 ## Referências
 
 - `docs/matching-contract.md` — contrato interno do matcher (M2-01); este

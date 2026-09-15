@@ -138,10 +138,10 @@ forma global neste contrato de Core.** Concretamente:
   usada, satisfazendo o critério de aceite 1 sem impor uma escolha global
   entre `DEFAULT_CONFIGURATION` e `EVIDENCE_BASED_CONFIGURATION` que nem o
   M2-05 nem a issue formal já fixaram.
-- Uma política de seleção automática de default entre as duas (por exemplo,
-  preferir `EVIDENCE_BASED_CONFIGURATION` por ser evidence-based) permanece
-  uma decisão em aberto de uma camada de Application futura, fora do escopo
-  deste documento de Core.
+- Desde S0009, a camada Application escolhe
+  `EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION` para Analyses novas. Essa
+  escolha não reinterpreta records históricos: cada execução continua usando
+  o método já capturado no snapshot persistido.
 
 ## 4. Captura no Ponto de Uso (Critério de Aceite 5)
 
@@ -257,6 +257,17 @@ registro externo de configurações versionadas.
 - Este documento não substitui revisão de fronteira explícita antes que
   M3-03 e M3-06 dependam deste contrato (ver seção 1 e o risco de alta
   severidade registrado por `states/M3/M3-02/issue-operational-state.json`).
+
+## Default após S0009
+
+Analyses novas capturam
+`acoustic_matching.acceptance.EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION`:
+`method="normalized_cross_correlation_multi_v1"` e o mesmo
+`acceptance_threshold` numérico derivado pelo corpus histórico. Registros já
+persistidos continuam autoexplicativos e não são migrados: o executor roteia
+pelo `matching.method`, preservando `normalized_cross_correlation_v1` como
+single-best. Nenhum campo foi acrescentado a `MatchingSnapshot`; supressão e
+limite são semânticas fixas do identificador versionado.
 
 ## Referências
 

@@ -53,6 +53,7 @@ from audio_cue_locator.infrastructure.acoustic_matching import (
 from audio_cue_locator.infrastructure.acoustic_matching.acceptance import (
     EVIDENCE_BASED_ACCEPTANCE_THRESHOLD,
     EVIDENCE_BASED_CONFIGURATION,
+    EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION,
     derive_acceptance_threshold,
 )
 
@@ -139,6 +140,17 @@ def test_evidence_based_configuration_reuses_baselines_configuration_shape():
     assert EVIDENCE_BASED_CONFIGURATION.method == "normalized_cross_correlation_v1"
     assert EVIDENCE_BASED_CONFIGURATION.acceptance_threshold == pytest.approx(
         EVIDENCE_BASED_ACCEPTANCE_THRESHOLD
+    )
+
+
+def test_multi_occurrence_configuration_reuses_the_historical_numeric_cutoff():
+    assert EVIDENCE_BASED_CONFIGURATION.method == "normalized_cross_correlation_v1"
+    assert (
+        EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION.method
+        == "normalized_cross_correlation_multi_v1"
+    )
+    assert EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION.acceptance_threshold == (
+        EVIDENCE_BASED_CONFIGURATION.acceptance_threshold
     )
 
 

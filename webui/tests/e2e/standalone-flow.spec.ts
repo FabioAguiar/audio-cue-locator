@@ -56,7 +56,9 @@ interface ResultEnvelope {
       outcome: {
         kind: "occurrences" | "no_match" | "failure";
         occurrences?: Array<{
+          temporal_position: number;
           score: number;
+          matching_method: string;
         }>;
       };
     }>;
@@ -105,6 +107,15 @@ function fixturePaths(): FixturePaths {
     ),
     noMatchCue: requiredEnvironmentValue("E2E_NO_MATCH_CUE_PATH"),
   };
+}
+
+function repeatedOccurrenceFixturePaths(): {
+  sourceMedia: string;
+  cue: string;
+} | null {
+  const sourceMedia = process.env.E2E_REPEATED_SOURCE_MEDIA_PATH?.trim();
+  const cue = process.env.E2E_REPEATED_CUE_PATH?.trim();
+  return sourceMedia && cue ? { sourceMedia, cue } : null;
 }
 
 function webuiBaseUrl(): string {
@@ -588,6 +599,63 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     expect(envelope.result.cues[0].outcome.kind).toBe("no_match");
 
     assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
+  });
+
+  test("renders every real repeated occurrence for one cue", async ({ page }) => {
+    test.setTimeout(analysisTimeoutMs + 30_000);
+    const repeated = repeatedOccurrenceFixturePaths();
+    test.skip(
+      repeated === null,
+      "Set E2E_REPEATED_SOURCE_MEDIA_PATH and E2E_REPEATED_CUE_PATH to run S0009 browser validation",
+    );
+    if (repeated === null) {
+      return;
+    }
+
+    const baseUrl = webuiBaseUrl();
+    const { analysisId } = await submitAnalysis(
+      page,
+      baseUrl,
+      repeated.sourceMedia,
+      [{ path: repeated.cue, name: "Repeated cue" }],
+    );
+    const resultBodies = captureSuccessfulResultBodies(page, analysisId);
+
+    await expect(page.getByRole("heading", { name: "Repeated cue" })).toBeVisible({
+      timeout: analysisTimeoutMs,
+    });
+    const responseBodies = await resolvedResultBodies(resultBodies);
+    const envelope = JSON.parse(
+      responseBodies[responseBodies.length - 1].toString("utf8"),
+    ) as ResultEnvelope;
+    const occurrences = envelope.result.cues[0].outcome.occurrences ?? [];
+    expect(occurrences.length).toBeGreaterThanOrEqual(2);
+    expect(occurrences.map((item) => item.temporal_position)).toEqual(
+      [...occurrences]
+        .map((item) => item.temporal_position)
+        .sort((left, right) => left - right),
+    );
+    expect(
+      occurrences.every(
+        (item) => item.matching_method === "normalized_cross_correlation_multi_v1",
+      ),
+    ).toBe(true);
+    await expect(page.locator(".occurrence-item")).toHaveCount(occurrences.length);
+    await expect(page.locator(".match-badge")).toContainText(
+      `${occurrences.length} matches found`,
+    );
+    const scoreBadges = page.locator(".occurrence-score-badge");
+    await expect(scoreBadges).toHaveCount(occurrences.length);
+    for (let index = 0; index < occurrences.length; index += 1) {
+      await expect(scoreBadges.nth(index)).toHaveText(
+        `Similarity score: ${occurrences[index].score.toFixed(2)}`,
+      );
+      await expect(scoreBadges.nth(index)).toHaveAttribute(
+        "title",
+        `Raw similarity score: ${occurrences[index].score}`,
+      );
+      await expect(scoreBadges.nth(index)).not.toContainText("%");
+    }
   });
 
   test("enforces local time validation and the 20-cue admission guard", async ({ page }) => {

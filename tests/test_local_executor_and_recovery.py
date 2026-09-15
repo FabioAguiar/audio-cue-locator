@@ -41,7 +41,9 @@ def _asset_id() -> str:
     return str(uuid4())
 
 
-def _configuration() -> EffectiveConfigurationSnapshot:
+def _configuration(
+    method: str = "normalized_cross_correlation_v1",
+) -> EffectiveConfigurationSnapshot:
     return EffectiveConfigurationSnapshot(
         canonicalization=CanonicalizationSnapshot(
             sample_rate_hz=48_000,
@@ -54,7 +56,7 @@ def _configuration() -> EffectiveConfigurationSnapshot:
             ),
         ),
         matching=MatchingSnapshot(
-            method="normalized_cross_correlation_v1",
+            method=method,
             acceptance_threshold=0.7,
         ),
         configuration_source_name="test",
@@ -66,12 +68,13 @@ def _create_analysis(
     analysis_id: str,
     *,
     cues: tuple[CueAssetReference, ...] | None = None,
+    configuration: EffectiveConfigurationSnapshot | None = None,
 ) -> None:
     repository.create(
         analysis_id=analysis_id,
         source_asset_id=_asset_id(),
         cues=cues or (CueAssetReference(cue_id="cue-1", asset_id=_asset_id()),),
-        effective_configuration=_configuration(),
+        effective_configuration=configuration or _configuration(),
         queued_at=QUEUED_AT,
     )
 
@@ -248,6 +251,43 @@ def test_executor_uses_persisted_per_cue_source_windows_and_publishes_absolute_t
     }
     assert positions["cue-full"] == 2 / 48_000
     assert positions["cue-windowed"] == 6 / 48_000
+
+
+def test_executor_preserves_multiple_occurrences_in_order_and_score(tmp_path: Path):
+    database_path = tmp_path / "analyses.sqlite"
+    method = "normalized_cross_correlation_multi_v1"
+    with SQLiteAnalysisRepository(database_path) as repository:
+        _create_analysis(
+            repository,
+            "multi-analysis",
+            configuration=_configuration(method),
+        )
+
+    cue = np.asarray([0.2, -0.8, 0.4, 0.9, -0.3, -0.6], dtype=np.float32)
+    source = np.zeros(30, dtype=np.float32)
+    source[3:9] = cue
+    source[19:25] = cue
+    result_store = InMemoryResultReferenceStore()
+    executor = LocalAnalysisExecutor(
+        _OpeningRepository(database_path),
+        max_concurrency=1,
+        result_store=result_store,
+    )
+    try:
+        execution = executor.submit(
+            "multi-analysis", source, {"cue-1": cue}
+        ).result(timeout=5)
+    finally:
+        executor.shutdown()
+
+    payload = json.loads(result_store.read(execution.result_reference))
+    occurrences = payload["cues"][0]["outcome"]["occurrences"]
+    assert [round(item["temporal_position"] * 48_000) for item in occurrences] == [
+        3,
+        19,
+    ]
+    assert [item["score"] for item in occurrences] == [1.0, 1.0]
+    assert all(item["matching_method"] == method for item in occurrences)
 
 
 def test_controlled_matching_failure_is_persisted_as_structured_error(

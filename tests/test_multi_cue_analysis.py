@@ -85,6 +85,9 @@ from audio_cue_locator.core.analysis_result import (
 from audio_cue_locator.infrastructure.acoustic_matching.baseline import (
     DEFAULT_CONFIGURATION,
 )
+from audio_cue_locator.infrastructure.acoustic_matching.acceptance import (
+    EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION,
+)
 from audio_cue_locator.infrastructure.media_processing.canonical_audio import (
     CANONICAL_AUDIO_SPEC,
 )
@@ -326,3 +329,31 @@ def test_manifest_declares_exactly_the_three_required_fixture_cases():
     }
     overlap_case = _case(manifest, "cross_cue_temporal_overlap")
     assert set(overlap_case["cues"]) == {"cue-overlap-b", "cue-overlap-c"}
+
+
+def test_multi_method_preserves_same_cue_multiplicity_and_cross_cue_independence():
+    cue_a = _canonical([0.2, -0.8, 0.4, 0.9, -0.3, -0.6])
+    cue_b = cue_a[1:5].copy()
+    source = np.zeros(32, dtype=np.float32)
+    source[3:9] = cue_a
+    source[20:26] = cue_a
+
+    outcomes = run_multi_cue_analysis(
+        source,
+        {"cue-a": cue_a, "cue-b": cue_b},
+        EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION,
+    )
+
+    cue_a_outcome = outcomes["cue-a"]
+    cue_b_outcome = outcomes["cue-b"]
+    assert isinstance(cue_a_outcome, ApplicationCueOccurrences)
+    assert isinstance(cue_b_outcome, ApplicationCueOccurrences)
+    assert len(cue_a_outcome.occurrences) == 2
+    assert len(cue_b_outcome.occurrences) == 2
+    for outcome in (cue_a_outcome, cue_b_outcome):
+        positions = [item.temporal_position for item in outcome.occurrences]
+        assert positions == sorted(positions)
+        assert all(
+            item.matching_method == "normalized_cross_correlation_multi_v1"
+            for item in outcome.occurrences
+        )

@@ -134,14 +134,14 @@ O comportamento material que a evidência e a implementação permitem afirmar
    o mais cedo na timeline;
 4. `match_cue` publica esse candidato somente quando seu score satisfaz a
    política de aceitação configurada;
-5. `run_multi_cue_analysis` chama `match_cue` exatamente uma vez por cue e
-   preserva um único `MatchResult` atribuído a cada `cue_id`.
+5. `run_multi_cue_analysis` preserva esse caminho histórico quando o método
+   persistido é `normalized_cross_correlation_v1`.
 
 O desempate pelo lag mais cedo é comportamento específico da implementação
 atual, não uma regra validada por fixture multi-occurrence nem uma garantia
 para métodos futuros.
 
-## 4. Política Inicial de Multiplicidade
+## 4. Política Histórica de Multiplicidade
 
 Para cada cue processada uma vez por `run_multi_cue_analysis` com
 `normalized_cross_correlation_v1`, aplica-se a seguinte política:
@@ -153,7 +153,7 @@ Para cada cue processada uma vez por `run_multi_cue_analysis` com
 | `invalid_input` | 0 | Não criar occurrence e não reclassificar a violação de pré-condição como `no_match`. |
 | `processing_failure` | 0 | Não criar occurrence e não converter a falha em uma coleção vazia que pareça processamento bem-sucedido. |
 
-Portanto, a cardinalidade observável do método atual é `0..1` occurrence por
+Portanto, a cardinalidade observável do método histórico é `0..1` occurrence por
 cue por invocação. Se o source contiver duas ou mais aparições reais da mesma
 cue, somente o best candidate selecionado internamente pode tornar-se uma
 occurrence. Os demais lags não são resultados candidatos expostos e não podem
@@ -192,15 +192,17 @@ matcher e não pode usar uma lista vazia isolada para esconder uma falha.
 Este contrato mantém duas camadas deliberadamente distintas:
 
 - **modelo conceitual:** uma cue pode ter `0..N` occurrences;
-- **produtor atual:** `normalized_cross_correlation_v1` produz `0..1`
-  occurrence por chamada porque expõe somente o best candidate.
+- **produtor histórico:** `normalized_cross_correlation_v1` produz `0..1`;
+- **produtor atual para Analyses novas:**
+  `normalized_cross_correlation_multi_v1` produz `0..100` occurrences
+  selecionadas por chamada.
 
-M3-06 deve serializar uma coleção de occurrences, ainda que o produtor atual
-alimente essa coleção com no máximo um item por cue. Não deve reduzir o
+M3-06 serializa uma coleção de occurrences e preserva todos os itens emitidos
+pelo produtor. Não deve reduzir o
 contrato a um único campo opcional que impeça multiplicidade futura.
 
-Expandir o produtor para `0..N` exige uma mudança explícita fora de M3-04,
-com pelo menos:
+S0009 realizou essa expansão de modo aditivo, mantendo a interface histórica
+e acrescentando:
 
 - uma interface que exponha múltiplos candidatos sem substituir silenciosamente
   o contrato atual;
@@ -247,6 +249,20 @@ Permanecem fora de escopo:
 | Métodos suportados explícitos | Seção 2 limita a política a `normalized_cross_correlation_v1`. |
 | Sem novo método ou confidence | Seções 4 e 7 proíbem nova busca, ranking, agrupamento, supressão e calibração. |
 | Contrato estável para M3-03 e M3-06 | Seções 5 e 6 preservam `cue_id -> MatchResult` e fixam coleção conceitual `0..N` com produtor atual `0..1`. |
+
+## Capacidade vigente após S0009
+
+- `normalized_cross_correlation_v1`: `0..1` occurrence por cue.
+- `normalized_cross_correlation_multi_v1`: `0..100` occurrences selecionadas
+  por cue; `CueOccurrences` continua conceitualmente `1..N` e nunca vazio.
+
+No método multi, cada lag representa `[lag, lag + cue_length)`. Seleção ocorre
+por score descendente, com lag anterior em empate; sobreposições com janelas
+já selecionadas são suprimidas, intervalos apenas encostados são distintos, e
+o resultado é reordenado cronologicamente. Por definição dessa versão, duas
+occurrences físicas cujas janelas completas se sobrepõem não podem ser ambas
+emitidas. Essa limitação não é generalizada para métodos futuros. `end`
+permanece ausente e deduplicação nunca cruza `cue_id`.
 
 ## Referências
 

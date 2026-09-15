@@ -293,6 +293,15 @@ repassado.
   todos permanecem inalterados.
 - API REST, WebUI, autenticação, ou execução assíncrona.
 
+## Multiplicidade após S0009
+
+O schema permanece `analysis_result.v1`: `occurrences` já é um array e não
+precisa de migração. Para `normalized_cross_correlation_multi_v1`, esse array
+retém todas as occurrences selecionadas (até 100 por cue), na ordem
+cronológica produzida pelo matcher, com score bruto, `matching_method` e
+`end=null`. `CueOccurrences` continua inválido quando vazio, e `no_match` e
+falha continuam ramos explícitos.
+
 ## Referências
 
 - `docs/architecture.md` -- Core, Analysis, Occurrence, Analysis Result,

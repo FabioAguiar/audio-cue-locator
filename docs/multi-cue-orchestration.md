@@ -95,8 +95,8 @@ fechada por-cue. Este módulo contém sua projeção executável imutável:
 
 As três formas não se sobrepõem. `CueOccurrences` valida no construtor que
 sua coleção tem pelo menos um item; zero occurrences não representa
-no-match nem falha. O produtor atual cria exatamente uma `Occurrence` para
-`FOUND`, preservando a política `0..1` de M3-04, embora o contrato aceite
+no-match nem falha. A cardinalidade é específica do método: `0..1` para o histórico e
+`0..100` para o produtor multi-occurrence, embora o contrato aceite
 `1..N` na variante matched para evolução futura.
 
 O mapeamento de Infrastructure para Core é explícito:
@@ -158,8 +158,8 @@ controlados (sem mídia representativa ao vivo):
   variantes explícitas por cue;
 - atribuição por `cue_id` correta independentemente da ordem de entrada das
   cues;
-- `match_cue` invocado exatamente uma vez por cue, nunca mais (critério de
-  aceite 1 e 3), verificado por espionagem da chamada real;
+- uma operação Infrastructure invocada exatamente uma vez por cue:
+  `match_cue` para v1 ou `match_cue_occurrences` para multi_v1;
 - a `EffectiveConfiguration` efetivamente usada em cada chamada é a que foi
   explicitamente fornecida à orquestração, nunca `DEFAULT_CONFIGURATION` ou
   `EVIDENCE_BASED_CONFIGURATION` lida como default pelo próprio módulo
@@ -182,7 +182,8 @@ controlados (sem mídia representativa ao vivo):
   de matching, paralela ou duplicada, é introduzida.
 - Execução paralela ou assíncrona de cues; `run_multi_cue_analysis` processa
   as cues sequencialmente, sem concorrência.
-- Política de seleção/deduplicação de múltiplas occurrences por cue (M3-04).
+- Qualquer política de seleção/deduplicação diferente da semântica fixa de
+  `normalized_cross_correlation_multi_v1`.
 - Agregação das variantes por-cue em lifecycle final ou no Analysis Result
   versionado (M3-06).
 - API REST, WebUI, ou persistência de estado de orquestração.
@@ -190,6 +191,16 @@ controlados (sem mídia representativa ao vivo):
 - Canonicalização de áudio: `source` e cada cue em `cues` devem já
   satisfazer `CANONICAL_AUDIO_SPEC` antes de chegar a este módulo, tal como
   já exigido por `match_cue` (`docs/matching-contract.md`, seção 1).
+
+## Roteamento por método após S0009
+
+A configuração persistida decide uma única operação de Infrastructure por
+cue: `normalized_cross_correlation_v1` chama `match_cue`, e
+`normalized_cross_correlation_multi_v1` chama `match_cue_occurrences`. Não há
+loop de remover resultado e buscar novamente, nem correlação na Application.
+Todos os candidatos aceitos do novo método viram `Occurrence`; quando existe
+uma janela S0008, o mesmo offset alinhado à grade de samples é aplicado a cada
+item antes da publicação.
 
 ## Referências
 

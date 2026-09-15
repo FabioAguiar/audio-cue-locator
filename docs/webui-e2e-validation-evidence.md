@@ -194,6 +194,7 @@ be changed to “passed” without an authorized real-backend execution.
 | Terminal/error activity stop (S0006) | No active activity remains after terminal Result or rejected source upload | Not executed in this phase |
 | Stale wait copy absent (S0006) | No user-facing `Creating…` or `Analyzing…` during the real flow | Not executed in this phase |
 | Reduced-motion fallback (S0006) | Semantic Uploading status and static artwork remain while computed continuous animation is disabled | Not executed in this phase |
+| S0009 repeated occurrence | With `E2E_REPEATED_SOURCE_MEDIA_PATH` and `E2E_REPEATED_CUE_PATH`, one real cue returns 2+ rows, chronological positions, an exact total-match badge, two-decimal visible scores, raw-score titles, and no percent wording; no Result route is mocked | Implemented; not executed in this phase |
 
 ## Test-phase recording requirements
 

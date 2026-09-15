@@ -289,6 +289,63 @@ def test_multi_cue_http_flow_resolves_each_submitted_cue_independently(
         _shutdown(executors)
 
 
+def test_new_analysis_returns_multiple_occurrences_for_one_repeated_cue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0009 real HTTP composition with generated, bounded WAV media."""
+
+    cue_samples = [0.2, -0.8, 0.4, 0.9, -0.3, -0.6]
+    source_samples = [0.0] * 36
+    source_samples[4:10] = cue_samples
+    source_samples[24:30] = cue_samples
+    _root, app, executors = _build_test_app(
+        monkeypatch, tmp_path, "multi-occurrence"
+    )
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(source_samples),
+                filename="repeated-source.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(cue_samples),
+                filename="repeated-cue.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            location = created.headers["location"]
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+
+            response = await client.get(f"{location}/result")
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            outcome = result["cues"][0]["outcome"]
+            assert result["method"] == "normalized_cross_correlation_multi_v1"
+            assert outcome["kind"] == "occurrences"
+            assert [
+                round(item["temporal_position"] * 48_000)
+                for item in outcome["occurrences"]
+            ] == [4, 24]
+            assert all(item["end"] is None for item in outcome["occurrences"])
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
 # --- video source: the real FFmpeg decode path through the public API ------
 
 

@@ -283,6 +283,16 @@ entradas e configuração — consistente com o precedente já estabelecido por
   calibração de confiança, aprendizado de máquina e processamento
   distribuído.
 
+## Configuração multi-occurrence de S0009
+
+`EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION` usa o método
+`normalized_cross_correlation_multi_v1` e reutiliza exatamente
+`EVIDENCE_BASED_ACCEPTANCE_THRESHOLD` como cutoff inclusivo de cada candidato
+(`score >= threshold`). `EVIDENCE_BASED_CONFIGURATION` permanece associado ao
+método histórico `normalized_cross_correlation_v1`. O corpus original é
+single-occurrence; S0009 não recalibra o limiar, não o converte em confidence
+ou porcentagem e não introduz configuração fornecida pelo cliente.
+
 ## Referências
 
 - `docs/matching-contract.md` — contrato interno do matcher (M2-01); este

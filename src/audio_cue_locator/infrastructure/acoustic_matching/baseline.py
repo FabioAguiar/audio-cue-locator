@@ -183,15 +183,16 @@ def _validate_preconditions(source: np.ndarray, cue: np.ndarray) -> str | None:
     return None
 
 
-def _locate_best_candidate(source: np.ndarray, cue: np.ndarray) -> tuple[int, float]:
-    """Return (best_lag_index, best_score) for cue against source.
+def _normalized_correlation_scores(
+    source: np.ndarray, cue: np.ndarray
+) -> np.ndarray:
+    """Return the normalized-correlation score for every valid sample lag.
 
-    Assumes the shared preconditions already hold and that
-    len(source) >= len(cue) >= 1. Ties (equal maximum score, including the
-    all-zero-score case) resolve to the earliest (lowest-index) lag, since
-    numpy.argmax returns the first occurrence of the maximum value.
+    Callers must first apply ``_validate_preconditions`` and ensure that the
+    source is at least as long as the non-empty cue.  This package-internal
+    helper is the single numerical implementation shared by the historical
+    single-best matcher and additive multi-occurrence matchers.
     """
-
     source_f64 = source.astype(np.float64)
     cue_f64 = cue.astype(np.float64)
     window_length = cue_f64.shape[0]
@@ -217,6 +218,20 @@ def _locate_best_candidate(source: np.ndarray, cue: np.ndarray) -> tuple[int, fl
     # undefined at every lag; every candidate's score deterministically
     # defaults to 0.0 ("no correlation"), the same fallback used above for
     # an individual silent window.
+
+    return scores
+
+
+def _locate_best_candidate(source: np.ndarray, cue: np.ndarray) -> tuple[int, float]:
+    """Return (best_lag_index, best_score) for cue against source.
+
+    Assumes the shared preconditions already hold and that
+    len(source) >= len(cue) >= 1. Ties (equal maximum score, including the
+    all-zero-score case) resolve to the earliest (lowest-index) lag, since
+    numpy.argmax returns the first occurrence of the maximum value.
+    """
+
+    scores = _normalized_correlation_scores(source, cue)
 
     best_index = int(np.argmax(scores))
     best_score = float(scores[best_index])

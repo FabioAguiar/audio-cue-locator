@@ -35,8 +35,8 @@ this module is the executable expression of that same decision.
 
 Score remains method-specific similarity, never a calibrated probability or a
 value comparable across matching methods (docs/matching-contract.md, section
-4); this module does not redefine that boundary, and is scoped to the
-"normalized_cross_correlation_v1" method only.
+4). S0009 adds a second named configuration that reuses the historical
+numeric cutoff for candidate acceptance without claiming new calibration.
 """
 
 from __future__ import annotations
@@ -146,4 +146,16 @@ harmonic cases, covering one harmonic-burst cue morphology, two additive-
 noise SNR levels, and no lossy-compression perturbation (docs/matching-
 robustness.md section 3.2, section 10). See docs/matching-acceptance.md for
 the full rationale and limitations.
+"""
+
+
+EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION = EffectiveConfiguration(
+    method="normalized_cross_correlation_multi_v1",
+    acceptance_threshold=EVIDENCE_BASED_ACCEPTANCE_THRESHOLD,
+)
+"""Initial configuration for the S0009 multi-occurrence producer.
+
+It deliberately reuses the numeric cutoff derived from the historical
+single-occurrence evidence corpus. This is candidate acceptance policy, not
+new calibration and not a probability or confidence interpretation.
 """

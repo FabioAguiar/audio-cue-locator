@@ -23,7 +23,10 @@ from typing import Any
 import httpx
 import pytest
 
-from audio_cue_locator.infrastructure.acoustic_matching import MatchOutcome, MatchResult
+from audio_cue_locator.infrastructure.acoustic_matching import (
+    MatchOutcome,
+    MultiMatchResult,
+)
 
 
 app_module = importlib.import_module("audio_cue_locator.interfaces.rest_api.app")
@@ -254,6 +257,57 @@ def test_complete_upload_to_versioned_result_http_flow(
         _shutdown(executors)
 
 
+def test_real_http_flow_returns_repeated_occurrences_for_one_cue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    cue_samples = [0.2, -0.8, 0.4, 0.9, -0.3, -0.6]
+    source_samples = [0.0] * 36
+    source_samples[4:10] = cue_samples
+    source_samples[24:30] = cue_samples
+    app, executors = _build_test_app(monkeypatch, tmp_path, "multi-occurrence")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(source_samples),
+                filename="repeated-source.wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(cue_samples),
+                filename="repeated-cue.wav",
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            location = created.headers["location"]
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+
+            response = await client.get(f"{location}/result")
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            occurrences = result["cues"][0]["outcome"]["occurrences"]
+            assert result["method"] == "normalized_cross_correlation_multi_v1"
+            assert [round(item["temporal_position"] * 48_000) for item in occurrences] == [
+                4,
+                24,
+            ]
+            assert [item["score"] for item in occurrences] == pytest.approx(
+                [1.0, 1.0], abs=1e-6
+            )
+            assert all(item["matching_method"] == result["method"] for item in occurrences)
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
 def test_invalid_and_unsupported_requests_use_the_shared_error_envelope(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -393,7 +447,7 @@ def test_http_202_returns_before_gate_controlled_processing_completes(
 ):
     entered = threading.Event()
     release = threading.Event()
-    real_match_cue = orchestration.match_cue
+    real_match_cue = orchestration.match_cue_occurrences
 
     def _gated_match(source, cue, configuration):
         entered.set()
@@ -401,7 +455,7 @@ def test_http_202_returns_before_gate_controlled_processing_completes(
             raise TimeoutError("test gate was not released")
         return real_match_cue(source, cue, configuration)
 
-    monkeypatch.setattr(orchestration, "match_cue", _gated_match)
+    monkeypatch.setattr(orchestration, "match_cue_occurrences", _gated_match)
     case = _manifest_case("found_offset_near_start")
     app, executors = _build_test_app(monkeypatch, tmp_path, "delayed")
 
@@ -448,13 +502,13 @@ def test_controlled_per_cue_matching_failure_remains_a_safe_cue_failure_over_htt
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     def _failed_match(source, cue, configuration):
-        return MatchResult(
+        return MultiMatchResult(
             outcome=MatchOutcome.PROCESSING_FAILURE,
             configuration=configuration,
             reason="controlled internal failure detail",
         )
 
-    monkeypatch.setattr(orchestration, "match_cue", _failed_match)
+    monkeypatch.setattr(orchestration, "match_cue_occurrences", _failed_match)
     case = _manifest_case("found_offset_near_start")
     app, executors = _build_test_app(monkeypatch, tmp_path, "failed")
 

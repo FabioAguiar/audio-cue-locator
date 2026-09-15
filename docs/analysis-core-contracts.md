@@ -112,9 +112,12 @@ Representa uma localização produzida pelo matcher para uma cue específica
 
 `Occurrence` representa apenas match aceito (`found`). `no_match`,
 `invalid_input` e `processing_failure` não produzem `Occurrence`. A
-coleção conceitual admite múltiplas occurrences, mas o produtor atual gera
-`0..1` por cue, conforme `docs/occurrence-temporal-semantics-and-policy.md`;
-esta issue não muda seleção, deduplicação ou semântica temporal.
+coleção conceitual admite múltiplas occurrences. O produtor histórico
+`normalized_cross_correlation_v1` gera `0..1`, enquanto
+`normalized_cross_correlation_multi_v1` gera `0..100` occurrences selecionadas
+por cue, conforme `docs/occurrence-temporal-semantics-and-policy.md`;
+S0009 fixa seleção, deduplicação e limite como semântica do novo método, sem
+alterar a forma do contrato Core.
 
 ## 3.1. `PerCueOutcome`: união fechada e exclusiva
 

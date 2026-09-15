@@ -342,3 +342,42 @@ def test_non_finite_score_is_rejected_at_serialization_time():
 
     with pytest.raises(ValueError):
         serialize_analysis_result(result)
+
+
+def test_multi_occurrence_tuple_serializes_in_producer_order_without_schema_change():
+    configuration = _configuration()
+    multi_method = "normalized_cross_correlation_multi_v1"
+    configuration = EffectiveConfigurationSnapshot(
+        canonicalization=configuration.canonicalization,
+        matching=MatchingSnapshot(
+            method=multi_method,
+            acceptance_threshold=configuration.matching.acceptance_threshold,
+        ),
+        configuration_source_name=(
+            "acoustic_matching.acceptance."
+            "EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION"
+        ),
+    )
+    result = AnalysisResult(
+        analysis_id="analysis-multi",
+        method=multi_method,
+        configuration=configuration,
+        cues=(
+            CueResult(
+                cue_id="cue-repeat",
+                outcome=CueOccurrences(
+                    occurrences=(
+                        Occurrence("cue-repeat", 1.25, 1.0, multi_method),
+                        Occurrence("cue-repeat", 4.5, 0.82, multi_method),
+                    )
+                ),
+            ),
+        ),
+    )
+
+    payload = json.loads(serialize_analysis_result(result))
+    occurrences = payload["cues"][0]["outcome"]["occurrences"]
+    assert payload["schema_version"] == "analysis_result.v1"
+    assert [item["temporal_position"] for item in occurrences] == [1.25, 4.5]
+    assert [item["score"] for item in occurrences] == [1.0, 0.82]
+    assert all(item["end"] is None for item in occurrences)

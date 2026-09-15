@@ -30,9 +30,12 @@ from audio_cue_locator.application.multi_cue_orchestration import (
 )
 from audio_cue_locator.infrastructure.acoustic_matching import (
     DEFAULT_CONFIGURATION,
+    MULTI_OCCURRENCE_METHOD,
     EffectiveConfiguration,
+    MatchCandidate,
     MatchOutcome,
     MatchResult,
+    MultiMatchResult,
 )
 
 
@@ -130,6 +133,71 @@ def test_match_cue_is_invoked_exactly_once_per_cue(monkeypatch):
     assert any(np.array_equal(arr, _FOUND_CUE) for arr in called_cue_arrays)
     assert any(np.array_equal(arr, _NO_MATCH_CUE) for arr in called_cue_arrays)
     assert all(call[2] == custom_configuration for call in calls)
+
+
+def test_multi_matcher_is_invoked_once_and_projects_all_candidates(monkeypatch):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    calls = 0
+    configuration = EffectiveConfiguration(
+        method=MULTI_OCCURRENCE_METHOD, acceptance_threshold=0.7
+    )
+
+    def _multi(source, cue, supplied_configuration):
+        nonlocal calls
+        calls += 1
+        assert supplied_configuration is configuration
+        return MultiMatchResult(
+            outcome=MatchOutcome.FOUND,
+            configuration=supplied_configuration,
+            candidates=(
+                MatchCandidate(timestamp_seconds=1 / 48_000, score=1.0),
+                MatchCandidate(timestamp_seconds=7 / 48_000, score=0.8),
+            ),
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue_occurrences", _multi)
+    result = run_multi_cue_analysis(
+        _shared_source(), {"cue": _FOUND_CUE}, configuration
+    )["cue"]
+
+    assert calls == 1
+    assert isinstance(result, CueOccurrences)
+    assert [item.temporal_position for item in result.occurrences] == pytest.approx(
+        [1 / 48_000, 7 / 48_000]
+    )
+    assert all(item.matching_method == MULTI_OCCURRENCE_METHOD for item in result.occurrences)
+
+
+def test_multi_occurrence_window_rebases_every_candidate(monkeypatch):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    configuration = EffectiveConfiguration(
+        method=MULTI_OCCURRENCE_METHOD, acceptance_threshold=0.7
+    )
+
+    def _multi(source, cue, supplied_configuration):
+        return MultiMatchResult(
+            outcome=MatchOutcome.FOUND,
+            configuration=supplied_configuration,
+            candidates=(
+                MatchCandidate(timestamp_seconds=1 / 48_000, score=1.0),
+                MatchCandidate(timestamp_seconds=5 / 48_000, score=0.8),
+            ),
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue_occurrences", _multi)
+    result = run_multi_cue_analysis(
+        np.arange(20, dtype=np.float32),
+        {"cue": _FOUND_CUE},
+        configuration,
+        source_windows={"cue": SourceSearchWindow(start_seconds=4 / 48_000)},
+    )["cue"]
+
+    assert isinstance(result, CueOccurrences)
+    assert [item.temporal_position for item in result.occurrences] == pytest.approx(
+        [5 / 48_000, 9 / 48_000]
+    )
 
 
 def test_independent_source_windows_slice_only_source_and_rebase_found_time(

@@ -284,6 +284,17 @@ encontrada".
   representativa — pré-requisito herdado de M1, pendente e não resolvido
   por este documento.
 
+## Produtor multi-occurrence aditivo (S0009)
+
+`normalized_cross_correlation_multi_v1` usa a mesma definição de score e
+avalia cada lag com `score >= acceptance_threshold`. Candidatos são priorizados
+por score descendente e lag ascendente; um candidato é suprimido quando seu
+intervalo completo `[lag, lag + cue_length)` sobrepõe um já selecionado.
+Intervalos apenas encostados sobrevivem. A seleção para em 100 occurrences por
+cue e a emissão final é cronológica. Score permanece similaridade bruta e
+`end` permanece ausente. O contrato histórico de
+`normalized_cross_correlation_v1` não muda.
+
 ## Referências
 
 - `docs/vision.md`

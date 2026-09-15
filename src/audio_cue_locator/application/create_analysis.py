@@ -42,7 +42,8 @@ a newly-discovered G9):
   `default_effective_configuration` below copies
   `infrastructure.media_processing.canonical_audio.CANONICAL_AUDIO_SPEC`
   into `canonicalization` and `infrastructure.acoustic_matching.
-  acceptance.EVIDENCE_BASED_CONFIGURATION` (the evidence-based policy, not
+  acceptance.EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION` (the S0009
+  multi-occurrence policy using the evidence-backed cutoff, not
   `baseline.py`'s provisional one) into `matching`.
 - G1/G8/G9 (canonicalization timing, existence-check cost, and the lifecycle
   constraint that forced the final design): `LocalAnalysisExecutor.submit`
@@ -138,7 +139,7 @@ from audio_cue_locator.core.analysis_result import (
 )
 from audio_cue_locator.core.asset import AssetStoragePort
 from audio_cue_locator.infrastructure.acoustic_matching.acceptance import (
-    EVIDENCE_BASED_CONFIGURATION,
+    EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION,
 )
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
     LocalAnalysisExecutor,
@@ -201,7 +202,7 @@ to be a long recording. Same evidence caveat as
 yet backed by representative measurement."""
 
 _EFFECTIVE_CONFIGURATION_SOURCE_NAME = (
-    "acoustic_matching.acceptance.EVIDENCE_BASED_CONFIGURATION"
+    "acoustic_matching.acceptance.EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION"
 )
 """Recorded verbatim in `EffectiveConfigurationSnapshot.configuration_source_name`,
 naming the evidence-based M2-05 policy this module selects by default (gap
@@ -351,14 +352,15 @@ def _default_clock() -> datetime:
 def default_effective_configuration() -> EffectiveConfigurationSnapshot:
     """Build this issue's chosen default `EffectiveConfigurationSnapshot`
     (gap G4): `CANONICAL_AUDIO_SPEC` copied field-by-field into
-    `canonicalization`, and `EVIDENCE_BASED_CONFIGURATION` copied
+    `canonicalization`, and
+    `EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION` copied
     field-by-field into `matching`. Never imports either Infrastructure
     type into a persisted value; only reads their already-fixed values once
     per call, exactly at the point of use (`docs/analysis-effective-
     configuration.md`, section 4)."""
 
     spec = CANONICAL_AUDIO_SPEC
-    matching_policy = EVIDENCE_BASED_CONFIGURATION
+    matching_policy = EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION
     return EffectiveConfigurationSnapshot(
         canonicalization=CanonicalizationSnapshot(
             sample_rate_hz=spec.sample_rate_hz,

@@ -14,11 +14,23 @@ from .baseline import (
     MatchResult,
     match_cue,
 )
+from .multi_occurrence import (
+    MAX_OCCURRENCES_PER_CUE,
+    MULTI_OCCURRENCE_METHOD,
+    MatchCandidate,
+    MultiMatchResult,
+    match_cue_occurrences,
+)
 
 __all__ = [
     "DEFAULT_CONFIGURATION",
     "EffectiveConfiguration",
     "MatchOutcome",
     "MatchResult",
+    "MAX_OCCURRENCES_PER_CUE",
+    "MULTI_OCCURRENCE_METHOD",
+    "MatchCandidate",
+    "MultiMatchResult",
     "match_cue",
+    "match_cue_occurrences",
 ]

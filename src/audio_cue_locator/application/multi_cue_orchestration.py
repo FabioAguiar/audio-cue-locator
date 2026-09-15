@@ -7,8 +7,9 @@ module closes that gap at the Application level, without building a second,
 parallel matching pipeline (formal issue M3-03, high-severity risk) and
 without introducing any new numeric matching, scoring, correlation, or
 acceptance logic of its own: `run_multi_cue_analysis` below calls the
-existing, unmodified `match_cue` exactly once per cue and projects each
-returned value into the Core outcome union without recomputing its numbers.
+one Infrastructure matching operation exactly once per cue, selected by the
+persisted method identity, and projects each returned value into the Core
+outcome union without recomputing its numbers.
 
 Resolves the gaps `intents/M3/M3-03/implementation-handoff.json` deliberately
 left for this module to decide (G1, G2, G7):
@@ -25,7 +26,7 @@ left for this module to decide (G1, G2, G7):
   does not yet define.
 - G2 (per-cue outcome representation): M3-05 now fixes the normative Core
   distinction in `docs/analysis-core-contracts.md`. Each Infrastructure
-  `MatchResult` is projected into exactly one immutable variant:
+  single- or multi-match result is projected into exactly one immutable variant:
   `CueOccurrences`, `CueNoMatch`, or `CueFailure`. Application consumes
   and preserves that contract; it does not infer no-match from an empty
   collection or expose the Infrastructure outcome enum as Core semantics.
@@ -33,7 +34,7 @@ left for this module to decide (G1, G2, G7):
   single parameter for the whole call, read once by the caller from the
   Analysis's own `effective_configuration.matching`
   (`docs/analysis-effective-configuration.md`, section 2) and passed
-  unchanged to every `match_cue` invocation. This mirrors that document's
+  unchanged to every method-selected matcher invocation. This mirrors that document's
   own point-of-use-capture principle (section 4) instead of re-deriving a
   competing per-cue re-read rule.
 
@@ -70,9 +71,12 @@ import numpy as np
 
 from audio_cue_locator.infrastructure.acoustic_matching import (
     EffectiveConfiguration,
+    MULTI_OCCURRENCE_METHOD,
     MatchOutcome,
     MatchResult,
+    MultiMatchResult,
     match_cue,
+    match_cue_occurrences,
 )
 from audio_cue_locator.infrastructure.media_processing.canonical_audio import (
     CANONICAL_AUDIO_SPEC,
@@ -247,6 +251,51 @@ def _to_per_cue_outcome(cue_id: str, result: MatchResult) -> PerCueOutcome:
     )
 
 
+def _to_multi_per_cue_outcome(
+    cue_id: str, result: MultiMatchResult
+) -> PerCueOutcome:
+    """Project one multi-occurrence Infrastructure result without loss."""
+
+    if result.outcome is MatchOutcome.FOUND:
+        if not result.candidates:
+            return CueFailure(
+                category=FailureCategory.INTERNAL_FAILURE,
+                message="multi-occurrence matcher returned an empty found result",
+            )
+        return CueOccurrences(
+            occurrences=tuple(
+                Occurrence(
+                    cue_id=cue_id,
+                    temporal_position=candidate.timestamp_seconds,
+                    score=candidate.score,
+                    matching_method=result.configuration.method,
+                    end=None,
+                )
+                for candidate in result.candidates
+            )
+        )
+
+    if result.outcome is MatchOutcome.NO_MATCH:
+        return CueNoMatch()
+
+    if result.outcome is MatchOutcome.INVALID_INPUT:
+        return CueFailure(
+            category=FailureCategory.INVALID_INPUT,
+            message=result.reason or "cue input is invalid",
+        )
+
+    if result.outcome is MatchOutcome.PROCESSING_FAILURE:
+        return CueFailure(
+            category=FailureCategory.MATCHING_FAILURE,
+            message="multi-occurrence matching failed while processing this cue",
+        )
+
+    return CueFailure(
+        category=FailureCategory.INTERNAL_FAILURE,
+        message="multi-occurrence matcher returned an unknown outcome",
+    )
+
+
 def _rebase_occurrence_times(
     outcome: PerCueOutcome, offset_seconds: float
 ) -> PerCueOutcome:
@@ -316,9 +365,11 @@ def run_multi_cue_analysis(
 ) -> dict[str, PerCueOutcome]:
     """Locate every cue of an Analysis within its shared source audio.
 
-    Calls `match_cue` (`baseline.py`, M2-02) exactly once per entry of
-    `cues`, against that Cue's requested slice of the same `source`, using
-    the complete Cue and `configuration` unchanged for every call -- never
+    Calls one method-selected Infrastructure matcher exactly once per entry
+    of `cues`: historical methods use `match_cue`, while
+    `normalized_cross_correlation_multi_v1` uses `match_cue_occurrences`.
+    Each receives that Cue's requested slice of the same `source`, the
+    complete Cue, and `configuration` unchanged -- never
     a module-level default such as
     `baseline.DEFAULT_CONFIGURATION` or `acceptance.EVIDENCE_BASED_CONFIGURATION`
     read directly by this function. Callers must supply the
@@ -366,9 +417,17 @@ def run_multi_cue_analysis(
             source,
             source_windows.get(cue_id) if source_windows is not None else None,
         )
-        outcome = _to_per_cue_outcome(
-            cue_id,
-            match_cue(source_window, cue_asset, configuration),
-        )
+        if configuration.method == MULTI_OCCURRENCE_METHOD:
+            outcome = _to_multi_per_cue_outcome(
+                cue_id,
+                match_cue_occurrences(source_window, cue_asset, configuration),
+            )
+        else:
+            # Preserve the historical path for persisted v1 records and for
+            # callers of the long-standing configurable baseline interface.
+            outcome = _to_per_cue_outcome(
+                cue_id,
+                match_cue(source_window, cue_asset, configuration),
+            )
         outcomes[cue_id] = _rebase_occurrence_times(outcome, offset_seconds)
     return outcomes
