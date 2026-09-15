@@ -55,6 +55,11 @@ from typing import Any
 import httpx
 import pytest
 
+from audio_cue_locator.infrastructure.acoustic_matching import (
+    MatchCandidate,
+    MatchOutcome,
+    MultiMatchResult,
+)
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
     SQLiteAnalysisRepository,
 )
@@ -67,6 +72,9 @@ from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
 from audio_cue_locator.observability.events import LOGGER_NAME
 
 app_module = importlib.import_module("audio_cue_locator.interfaces.rest_api.app")
+orchestration = importlib.import_module(
+    "audio_cue_locator.application.multi_cue_orchestration"
+)
 _REAL_BUILD_ANALYSIS_USE_CASES = app_module._build_analysis_use_cases
 
 FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "fixtures"
@@ -802,3 +810,113 @@ def test_cleanup_removes_uniquely_owned_assets_after_an_http_completed_analysis(
     with SQLiteAnalysisRepository(db_path) as repository:
         second_pass = cleanup_expired_assets(repository, storage, now=far_future)
     assert second_pass.deleted_asset_ids == ()
+
+
+# --- S0013: occurrence audition for a real video source -------------------
+
+
+@pytest.mark.skipif(_FFMPEG_UNAVAILABLE, reason=_FFMPEG_SKIP_REASON)
+def test_webm_source_occurrence_audition_returns_a_valid_wav_over_real_http(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0013 acceptance: occurrence audition works for every S0002-supported
+    video container through FFmpeg, not only WAV source media. Reuses this
+    module's own WebM synthesis/composition path
+    (`test_webm_source_with_audio_completes_the_real_http_analysis_flow`
+    above) rather than adding a large binary fixture: real FFmpeg decodes
+    and canonicalizes the WebM source exactly like that scenario, and real
+    FFmpeg renders the occurrence audition segment from the same source
+    bytes afterward.
+
+    The synthesized WebM tone carries no documented ground-truth cue
+    occurrence (same caveat as the MP4/WebM Analysis scenarios above), so
+    -- exactly like `tests/test_api_v1_integration.py`'s own controlled
+    matching-failure scenario -- only the acoustic-matching *outcome* is
+    replaced at its existing `match_cue_occurrences` test seam with one
+    deterministic accepted occurrence; media upload, canonicalization,
+    Analysis persistence, and audition rendering all stay real and
+    unmocked."""
+
+    case = _manifest_case("found_offset_near_start")
+    root, app, executors = _build_test_app(monkeypatch, tmp_path, "audition-webm")
+
+    def _deterministic_match(source, cue, configuration):
+        return MultiMatchResult(
+            outcome=MatchOutcome.FOUND,
+            configuration=configuration,
+            candidates=(MatchCandidate(timestamp_seconds=0.05, score=0.95),),
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue_occurrences", _deterministic_match)
+
+    webm_path = root / "tone.webm"
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+            "-c:a", "libvorbis",
+            str(webm_path),
+        ],
+        shell=False,
+        check=True,
+        timeout=30,
+    )
+    video_bytes = webm_path.read_bytes()
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                video_bytes,
+                filename="tone.webm",
+                content_type="video/webm",
+                expected_media_type="video/webm",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(case["cue"]),
+                filename="cue.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            analysis_id = created.json()["analysis_id"]
+            location = created.headers["location"]
+
+            terminal = await _poll_terminal(
+                client, location, attempts=600, interval_seconds=0.25
+            )
+            assert terminal["status"] == "succeeded"
+
+            result_response = await client.get(f"{location}/result")
+            assert result_response.status_code == 200, result_response.text
+            outcome = result_response.json()["result"]["cues"][0]["outcome"]
+            assert outcome["kind"] == "occurrences"
+            assert outcome["occurrences"][0]["temporal_position"] == pytest.approx(
+                0.05
+            )
+
+            occurrence_audio = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/occurrences/0/audio"
+            )
+            assert occurrence_audio.status_code == 200, occurrence_audio.text
+            body = occurrence_audio.content
+            assert body[:4] == b"RIFF"
+            assert body[8:12] == b"WAVE"
+            assert len(body) > 0
+            assert occurrence_audio.headers["content-type"] == "audio/wav"
+            assert occurrence_audio.headers["cache-control"] == "no-store"
+            assert (
+                occurrence_audio.headers["x-content-type-options"] == "nosniff"
+            )
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)

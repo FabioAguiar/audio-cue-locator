@@ -51,6 +51,18 @@ M5-05's Application-owned `AnalysisResultNotReadyError` and
 `AnalysisFailedError` are mapped here directly to distinct safe codes at the
 shared 409 status. The older REST-owned `AnalysisResultUnavailableError`
 mapping remains additive compatibility for existing callers.
+
+S0013 reuses this same closed vocabulary for the new audition endpoints
+rather than adding an `ErrorCode`: `application.query_analysis.
+AuditionTargetNotFoundError` maps to the existing `resource_not_found`/404
+family (alongside `AssetNotFoundError`/`AnalysisNotFoundError`), and
+`AudioAuditionResourceLimitError` maps to the existing
+`resource_limit_exceeded`/413 family (alongside `ResourceLimitExceededError`).
+`application.query_analysis.AudioAuditionRenderingError` is deliberately
+left unmapped, exactly like `AnalysisResultIntegrityError`: the generic
+`Exception` handler below already translates it to the sanitized
+`internal_error`/500 response without ever exposing FFmpeg stderr or a
+physical path.
 """
 
 from __future__ import annotations
@@ -71,6 +83,8 @@ from audio_cue_locator.application.multi_cue_orchestration import (
 from audio_cue_locator.application.query_analysis import (
     AnalysisFailedError,
     AnalysisResultNotReadyError,
+    AuditionTargetNotFoundError,
+    AudioAuditionResourceLimitError,
 )
 from audio_cue_locator.application.ports.analysis_repository import (
     AnalysisAlreadyExistsError,
@@ -163,6 +177,16 @@ _EXCEPTION_STATUS_MAP: tuple[tuple[type[Exception], ErrorCode, int], ...] = (
         AnalysisResultUnavailableError,
         ErrorCode.ANALYSIS_FAILED,
         status.HTTP_409_CONFLICT,
+    ),
+    (
+        AuditionTargetNotFoundError,
+        ErrorCode.RESOURCE_NOT_FOUND,
+        status.HTTP_404_NOT_FOUND,
+    ),
+    (
+        AudioAuditionResourceLimitError,
+        ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     ),
 )
 """Closed mapping from one caught exception type to its `ErrorCode` and

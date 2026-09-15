@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import struct
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,6 +46,31 @@ from audio_cue_locator.application.create_analysis import (
     _mp4_bytes_to_canonical_array,
     _wav_bytes_to_canonical_array,
 )
+from audio_cue_locator.application.ports.analysis_repository import (
+    AnalysisNotFoundError,
+    AnalysisRecord,
+    CueAssetReference,
+    LifecycleTimestamps,
+)
+from audio_cue_locator.application.query_analysis import (
+    DEFAULT_MAX_AUDIO_AUDITION_DURATION_SECONDS,
+    DEFAULT_MAX_AUDIO_AUDITION_RESPONSE_BYTES,
+    AudioAuditionResourceLimitError,
+    QueryAnalysisUseCase,
+)
+from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
+from audio_cue_locator.core.analysis_result import (
+    AnalysisResult,
+    CanonicalizationSnapshot,
+    CueNoMatch,
+    CueOccurrences,
+    CueResult,
+    EffectiveConfigurationSnapshot,
+    MatchingSnapshot,
+    NormalizationSnapshot,
+    Occurrence,
+    serialize_analysis_result,
+)
 from audio_cue_locator.core.asset import AssetType
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
     DEFAULT_MAX_CONCURRENCY,
@@ -60,7 +86,11 @@ from audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter import (
     FFmpegMediaAdapter,
 )
 from audio_cue_locator.infrastructure.media_processing.models import ProbeResult
-from audio_cue_locator.interfaces.rest_api.analysis_routes import _create_analysis
+from audio_cue_locator.interfaces.rest_api.analysis_routes import (
+    _create_analysis,
+    _get_cue_audio,
+    _get_occurrence_audio,
+)
 from audio_cue_locator.interfaces.rest_api.app import (
     _build_asset_storage,
     _build_create_analysis_use_case,
@@ -132,6 +162,8 @@ def test_documented_defaults_have_not_silently_drifted():
     assert DEFAULT_TIMEOUT_SECONDS == 30.0
     assert DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS == 3600.0
     assert DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS == 600.0
+    assert DEFAULT_MAX_AUDIO_AUDITION_DURATION_SECONDS == 600.0
+    assert DEFAULT_MAX_AUDIO_AUDITION_RESPONSE_BYTES == 64 * 1024 * 1024
 
 
 # --- media duration: WAV -----------------------------------------------------
@@ -350,3 +382,225 @@ def test_composition_root_wires_overrides_into_the_constructed_use_case(
     assert created_use_case._executor._worker_pool._max_workers == 2
     assert created_use_case.max_source_media_duration_seconds == 111.0
     assert created_use_case.max_cue_media_duration_seconds == 22.0
+
+
+# --- S0013: audio audition duration/response-byte guardrails ---------------
+
+_AUDITION_CANONICAL_RATE = CANONICAL_AUDIO_SPEC.sample_rate_hz
+_AUDITION_SOURCE_ASSET_ID = "00000000-0000-4000-8000-000000000101"
+_AUDITION_CUE_ASSET_ID = "00000000-0000-4000-8000-000000000102"
+_AUDITION_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _audition_wav_bytes(
+    frame_count: int, *, frame_rate: int = _AUDITION_CANONICAL_RATE
+) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(frame_rate)
+        writer.writeframes(struct.pack(f"<{frame_count}h", *([0] * frame_count)))
+    return buffer.getvalue()
+
+
+def _audition_configuration() -> EffectiveConfigurationSnapshot:
+    return EffectiveConfigurationSnapshot(
+        canonicalization=CanonicalizationSnapshot(
+            sample_rate_hz=_AUDITION_CANONICAL_RATE,
+            channels=1,
+            sample_format="float32",
+            normalization=NormalizationSnapshot(
+                enabled=True, method="peak", target_peak_amplitude=1.0
+            ),
+        ),
+        matching=MatchingSnapshot(
+            method="normalized_cross_correlation_v1", acceptance_threshold=0.7
+        ),
+        configuration_source_name="tests.operational.test_guardrails",
+    )
+
+
+def _audition_record() -> AnalysisRecord:
+    timestamps = LifecycleTimestamps(queued_at=_AUDITION_NOW, running_at=_AUDITION_NOW, succeeded_at=_AUDITION_NOW)
+    return AnalysisRecord(
+        analysis_id="audition-analysis-1",
+        state=AnalysisLifecycleState.SUCCEEDED,
+        source_asset_id=_AUDITION_SOURCE_ASSET_ID,
+        cues=(CueAssetReference(cue_id="cue-1", asset_id=_AUDITION_CUE_ASSET_ID),),
+        effective_configuration=_audition_configuration(),
+        lifecycle_timestamps=timestamps,
+        result_reference="result:1",
+    )
+
+
+class _AuditionRepository:
+    def __init__(self, record: AnalysisRecord) -> None:
+        self._record = record
+
+    def get(self, analysis_id: str) -> AnalysisRecord:
+        if analysis_id != self._record.analysis_id:
+            raise AnalysisNotFoundError(analysis_id)
+        return self._record
+
+
+class _AuditionResultReader:
+    def __init__(self, serialized: str) -> None:
+        self._serialized = serialized
+
+    def read(self, reference: str) -> str:
+        return self._serialized
+
+
+class _AuditionAssetStorage:
+    def __init__(self, contents: dict[str, bytes]) -> None:
+        self._contents = dict(contents)
+
+    def read(self, identifier: str) -> bytes:
+        return self._contents[identifier]
+
+
+class _AuditionRenderer:
+    """Constructor-level test seam: returns a fixed-size body without
+    invoking FFmpeg, keeping these guardrail tests independent of the real
+    subprocess boundary (already covered by
+    `tests/test_media_processing_ffmpeg_adapter.py`)."""
+
+    def __init__(self, output_size_bytes: int) -> None:
+        self._output = b"\x00" * output_size_bytes
+        self.called = False
+
+    def render_wav_segment(
+        self, media_bytes, *, start_seconds, duration_seconds, sample_rate_hz
+    ) -> bytes:
+        self.called = True
+        return self._output
+
+
+def _audition_use_case(
+    *,
+    cue_bytes: bytes,
+    max_audition_duration_seconds: float = DEFAULT_MAX_AUDIO_AUDITION_DURATION_SECONDS,
+    max_audition_response_bytes: int = DEFAULT_MAX_AUDIO_AUDITION_RESPONSE_BYTES,
+    renderer: _AuditionRenderer | None = None,
+) -> QueryAnalysisUseCase:
+    record = _audition_record()
+    result = AnalysisResult(
+        analysis_id=record.analysis_id,
+        method=_audition_configuration().matching.method,
+        configuration=_audition_configuration(),
+        cues=(CueResult(cue_id="cue-1", outcome=CueNoMatch()),),
+    )
+    return QueryAnalysisUseCase(
+        _AuditionRepository(record),
+        _AuditionResultReader(serialize_analysis_result(result)),
+        asset_storage=_AuditionAssetStorage(
+            {
+                _AUDITION_CUE_ASSET_ID: cue_bytes,
+                _AUDITION_SOURCE_ASSET_ID: b"source-bytes",
+            }
+        ),
+        audition_renderer=renderer or _AuditionRenderer(len(cue_bytes)),
+        max_audition_duration_seconds=max_audition_duration_seconds,
+        max_audition_response_bytes=max_audition_response_bytes,
+    )
+
+
+def test_audition_duration_at_the_exact_configured_boundary_is_allowed():
+    cue_bytes = _audition_wav_bytes(_AUDITION_CANONICAL_RATE)  # exactly 1.0s
+    use_case = _audition_use_case(cue_bytes=cue_bytes, max_audition_duration_seconds=1.0)
+
+    payload = use_case.get_cue_audition("audition-analysis-1", "cue-1")
+
+    assert payload.content == cue_bytes
+
+
+def test_audition_duration_above_the_configured_limit_is_rejected():
+    cue_bytes = _audition_wav_bytes(2 * _AUDITION_CANONICAL_RATE)  # 2.0s
+    use_case = _audition_use_case(cue_bytes=cue_bytes, max_audition_duration_seconds=1.0)
+
+    with pytest.raises(AudioAuditionResourceLimitError):
+        use_case.get_cue_audition("audition-analysis-1", "cue-1")
+
+
+def test_audition_response_bytes_at_the_exact_configured_boundary_is_allowed():
+    cue_bytes = _audition_wav_bytes(_AUDITION_CANONICAL_RATE)
+    use_case = _audition_use_case(
+        cue_bytes=cue_bytes, max_audition_response_bytes=len(cue_bytes)
+    )
+
+    payload = use_case.get_cue_audition("audition-analysis-1", "cue-1")
+
+    assert payload.content == cue_bytes
+
+
+def test_audition_response_bytes_above_the_configured_limit_is_rejected():
+    cue_bytes = _audition_wav_bytes(_AUDITION_CANONICAL_RATE)
+    use_case = _audition_use_case(
+        cue_bytes=cue_bytes, max_audition_response_bytes=len(cue_bytes) - 1
+    )
+
+    with pytest.raises(AudioAuditionResourceLimitError):
+        use_case.get_cue_audition("audition-analysis-1", "cue-1")
+
+
+def test_rendered_occurrence_body_above_the_configured_limit_is_rejected_and_never_rendered_into_a_response():
+    cue_bytes = _audition_wav_bytes(_AUDITION_CANONICAL_RATE)
+    oversized_renderer = _AuditionRenderer(output_size_bytes=100)
+    use_case = _audition_use_case(
+        cue_bytes=cue_bytes,
+        max_audition_response_bytes=50,
+        renderer=oversized_renderer,
+    )
+    result = AnalysisResult(
+        analysis_id="audition-analysis-1",
+        method=_audition_configuration().matching.method,
+        configuration=_audition_configuration(),
+        cues=(
+            CueResult(
+                cue_id="cue-1",
+                outcome=CueOccurrences(
+                    occurrences=(
+                        Occurrence(
+                            cue_id="cue-1",
+                            temporal_position=0.5,
+                            score=0.9,
+                            matching_method=_audition_configuration().matching.method,
+                        ),
+                    )
+                ),
+            ),
+        ),
+    )
+    use_case._result_reader._serialized = serialize_analysis_result(result)
+
+    # The route-level handler is exercised directly (mirroring this file's
+    # own `_create_analysis` convention): a guardrail rejection must
+    # propagate as the existing error-handling exception, never as a
+    # `Response` carrying an over-limit or partial binary body.
+    with pytest.raises(AudioAuditionResourceLimitError):
+        _get_occurrence_audio("audition-analysis-1", "cue-1", 0, use_case)
+
+    assert oversized_renderer.called is True
+
+
+def test_audition_guardrails_do_not_alter_analysis_creation_or_matching_limits():
+    """S0013 acceptance: the audition duration/response-byte guardrails are
+    independent response-delivery bounds -- they never change the existing
+    source/Cue upload, source/Cue matching-duration, or Asset retention
+    limits."""
+
+    assert DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS == 3600.0
+    assert DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS == 600.0
+    assert DEFAULT_MAX_SOURCE_MEDIA_UPLOAD_SIZE_BYTES == 500 * 1024 * 1024
+    assert DEFAULT_MAX_CUE_UPLOAD_SIZE_BYTES == 50 * 1024 * 1024
+
+    # A rejected audition request must not itself change these Application
+    # constants nor the constructed `CreateAnalysisUseCase`'s own bounds.
+    cue_bytes = _audition_wav_bytes(2 * _AUDITION_CANONICAL_RATE)
+    use_case = _audition_use_case(cue_bytes=cue_bytes, max_audition_duration_seconds=1.0)
+    with pytest.raises(AudioAuditionResourceLimitError):
+        use_case.get_cue_audition("audition-analysis-1", "cue-1")
+
+    assert DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS == 3600.0
+    assert DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS == 600.0

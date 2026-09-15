@@ -151,6 +151,63 @@ future, separately authorized test-execution phase measures actual
 memory/CPU behavior under the concurrency bound above and finds it
 insufficient.
 
+## Audition delivery guardrails (S0013)
+
+S0013 adds two further guardrails, owned by
+`application/query_analysis.py` rather than `application/create_analysis.py`,
+bounding the **two audition endpoints'** (`docs/rest-api-v1-contract.md`,
+"Analysis Cue/occurrence audio audition") response delivery only:
+
+| Guardrail | Default | Unit | Environment override | Enforced at |
+|---|---:|---|---|---|
+| Max single audition duration | 600 s (10 min) | seconds | none (fixed) | `application/query_analysis.py` (`DEFAULT_MAX_AUDIO_AUDITION_DURATION_SECONDS`), before any FFmpeg render call |
+| Max single audition response body | 64 MiB (`67,108,864` bytes) | bytes | none (fixed) | `application/query_analysis.py` (`DEFAULT_MAX_AUDIO_AUDITION_RESPONSE_BYTES`), before the response body is returned |
+
+Both are exact-fixed defaults with **no environment-variable configuration
+surface**: unlike every guardrail in the catalog above, S0013 deliberately
+does not add a corresponding `AUDIO_CUE_LOCATOR_*` variable to
+`interfaces/rest_api/app.py`'s composition root. A constructor override
+remains available for deterministic tests
+(`tests/operational/test_guardrails.py`) only.
+
+**These values bound playback delivery; they never change upload or
+matching eligibility.** In particular:
+
+- They are independent of, and never alter, the pre-existing source/Cue
+  upload-size limits, the source/Cue matching-duration limits
+  (`DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS` /
+  `DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS` above), or Asset retention
+  windows. A Cue or source Asset that was perfectly acceptable for upload
+  and matching can still have its *audition* rejected if its canonical
+  duration or rendered body exceeds these two fixed bounds.
+- Exact equality at either bound is allowed; only a value strictly greater
+  than the configured maximum is rejected
+  (`application.query_analysis.AudioAuditionResourceLimitError`, mapped to
+  the existing `resource_limit_exceeded`/413 family -- no new `ErrorCode`).
+- The duration guardrail is checked **before** the occurrence renderer
+  ever runs, so a single occurrence-audition request can never ask FFmpeg
+  to decode/emit an unbounded source segment.
+
+### Occurrence audition output format
+
+The rendered occurrence WAV is always:
+
+```text
+mono
+16-bit PCM (pcm_s16le)
+the requesting Analysis's own canonical sample rate
+(record.effective_configuration.canonicalization.sample_rate_hz)
+```
+
+produced by one bounded `infrastructure/media_processing/
+ffmpeg_adapter.py`'s `FFmpegMediaAdapter.render_wav_segment` call --
+accurate output seeking (`-ss`/`-t` as ffmpeg output options, after
+`-i`), never keyframe-only approximate input seeking. No peak, gain, or
+loudness normalization is applied: this preview exists for human auditory
+verification of the actual candidate window, so it is deliberately not
+put through the same normalization Analysis-creation canonicalization
+applies before matching.
+
 ## Structured error behavior
 
 ### Decision: a processing timeout is distinguished internally, not by a new public error category
@@ -203,10 +260,12 @@ an existing member, so it carries no equivalent contract-test risk.
 
 | `error_code` | HTTP status | Raised for |
 |---|---:|---|
-| `resource_limit_exceeded` | 413 | Oversized upload, too many cues, **or an over-duration source/cue Asset (new)**. |
-| `unsupported_media` | 415 | Invalid/unsupported/malformed media, **or an FFmpeg probe/decode timeout (new, deliberately conflated -- see decision above)**. |
+| `resource_limit_exceeded` | 413 | Oversized upload, too many cues, an over-duration source/cue Asset, **or an over-duration/over-size audition response (S0013)**. |
+| `unsupported_media` | 415 | Invalid/unsupported/malformed media, or an FFmpeg probe/decode timeout (deliberately conflated -- see decision above). |
+| `resource_not_found` | 404 | A missing Asset/Analysis, **or an S0013 audition target that does not exist for the requested Analysis (an unknown `cue_id`, a `cue_id` from a different Analysis, a `no_match`/`failure` Cue, or an out-of-range `occurrence_index`)**. |
 
-No new `error_code` value is introduced. See
+No new `error_code` value is introduced -- S0013's audition guardrail/
+target-not-found failures reuse the two existing rows above unchanged. See
 [`docs/rest-api-v1-contract.md`](rest-api-v1-contract.md) for the complete
 error-code catalog, including the six codes this issue leaves entirely
 unchanged.

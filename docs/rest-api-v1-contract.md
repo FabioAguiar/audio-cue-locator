@@ -50,7 +50,10 @@ The executable contract lives in these modules under
   `AnalysisRepositoryPort` and M4-04 `LocalAnalysisExecutor`.
 - `application/query_analysis.py` (M5-05) — the read-only Application
   boundary for authoritative persisted status and lifecycle-gated Result
-  retrieval through an opaque-reference reader port.
+  retrieval through an opaque-reference reader port. S0013 extends it with
+  two bounded audio audition methods (`get_cue_audition`/
+  `get_occurrence_audition`) and the Application-owned
+  `AudioAuditionRendererPort` Protocol.
 
 M5-01 does **not** implement Analysis creation or status/result retrieval;
 those are owned by M5-04 and M5-05. M5-02 implements the shared Error
@@ -152,6 +155,8 @@ M3 Result schema (`docs/analysis-result-schema.md`).
 | `/api/v1/analyses` | POST | 202 | Asynchronous Analysis creation from Asset identities (M5-04). |
 | `/api/v1/analyses/{analysis_id}` | GET | 200 | Current persisted Analysis status (M5-05). |
 | `/api/v1/analyses/{analysis_id}/result` | GET | 200 | Independently versioned Result for a SUCCEEDED Analysis (M5-05). |
+| `/api/v1/analyses/{analysis_id}/cues/{cue_id}/audio` | GET | 200 | Audition the original Cue WAV bytes for a completed Analysis Cue (S0013). |
+| `/api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio` | GET | 200 | Audition the exact source-time window one accepted Result occurrence represents (S0013). |
 
 The complete baseline status catalog (`app.V1_STATUS_CATALOG`) reserves one
 name per HTTP status every later M5 endpoint issue must reuse rather than
@@ -637,6 +642,164 @@ version. The canonical Result body is returned unchanged. In particular, a
 `{"kind": "no_match", "occurrences": null, "failure": null}`—never a
 FAILED Analysis or an Error response.
 
+## Analysis Cue/occurrence audio audition (S0013)
+
+Two Analysis-scoped, bounded binary routes let a client audition:
+
+```text
+GET /api/v1/analyses/{analysis_id}/cues/{cue_id}/audio
+
+GET /api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio
+```
+
+**These are audition endpoints, not a generic Asset download.** There is no
+`GET /api/v1/assets/{asset_id}` route, no query parameter accepts an
+arbitrary source timestamp/duration, and every audition target is derived
+entirely from the already-authoritative persisted Analysis and its
+completed Result — never from a client-supplied Asset identifier or
+position. `occurrence_index` is zero-based and indexes the canonical
+occurrence array a completed Result already returns for that Cue.
+
+Both routes return, on success:
+
+```text
+Content-Type: audio/wav
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+```
+
+with a `Content-Length` generated from the bounded in-memory body; neither
+route sets `Content-Disposition` with a client-supplied filename.
+
+### Completed-Result lifecycle gate
+
+Both routes are gated exactly like `GET .../result` above, by calling the
+same `QueryAnalysisUseCase.get_result`: `queued`/`running` returns 409
+`result_not_ready`, `failed` returns 409 `analysis_failed`, a missing
+Analysis returns 404 `resource_not_found`, and an invalid stored Result on
+a `succeeded` record returns the sanitized 500 `internal_error`. A Cue
+whose own per-Cue outcome is `no_match` or `failure` remains auditionable
+through the Cue-audio route (its owning Analysis still completed and its
+Asset still exists); it has no valid target for the occurrence-audio route.
+
+### Cue audio (`.../cues/{cue_id}/audio`)
+
+Returns the complete, original, unmodified Cue WAV bytes exactly as
+uploaded. S0008's `trim_start_seconds`/`trim_end_seconds` constrain the
+source *search window*, never Cue playback, so they are never applied
+here. `cue_id` ownership is resolved only from `record.cues` on the
+requested Analysis (`application.query_analysis.QueryAnalysisUseCase.
+_find_cue_reference`); a `cue_id` not present on that Analysis — including
+one that belongs to a different Analysis — returns 404
+`resource_not_found`. A retention-deleted Cue Asset returns the existing
+404 `resource_not_found` (`AssetNotFoundError`), unchanged.
+
+### Occurrence audio (`.../cues/{cue_id}/occurrences/{occurrence_index}/audio`)
+
+Renders a transient mono PCM16 WAV segment of the source media through the
+existing `infrastructure.media_processing.FFmpegMediaAdapter`:
+
+```text
+start_seconds    = occurrence.temporal_position  (exact, raw, unrounded)
+duration_seconds = the complete Cue's canonical matching duration
+sample_rate_hz   = the Analysis's own canonical sample rate
+```
+
+`temporal_position` is read directly from the stored Result's occurrence
+array — S0008 already rebased it to absolute source-origin time, so it is
+never re-adjusted by a trim bound, rounded to a display value, or snapped
+to a whole second. The render duration is the complete canonical Cue
+duration (see "Canonical Cue duration" below), an **audition-window**
+concept entirely independent from `Occurrence.end`, which the current
+matching methods still serialize as `null` and which this endpoint never
+reads, populates, or reinterprets.
+
+Occurrence resolution reads the canonical Result only (never a
+client-supplied position or score): a negative index, an index at or past
+the Cue's occurrence count, a `no_match`/`failure` Cue outcome, or a Cue
+missing from the Result all return 404 `resource_not_found`; a
+structurally invalid stored Result (an unrecognized outcome `kind`, or a
+malformed occurrence entry) returns the sanitized 500 `internal_error`
+instead, mirroring the same distinction `GET .../result` already makes.
+
+Works identically whether the source media is a native WAV upload or any
+S0002-supported video container (MP4/M4V, MOV, WebM, MKV, AVI): the
+adapter decodes/extracts the selected audio stream exactly like Analysis
+creation's own canonicalization path, then resamples/downmixes to the
+Analysis's canonical mono/PCM16/sample-rate output — never applying peak,
+gain, or loudness normalization, since this preview exists for human
+auditory verification of the actual candidate window.
+
+### Canonical Cue duration
+
+Both routes rely on the same canonical-duration rule Analysis creation's
+own `_resample(...)` target-length calculation uses, reproduced from the
+persisted Cue bytes' own WAV header (`wave.getnframes`/`getframerate`)
+without importing that private helper:
+
+```text
+target_length     = max(1, round(frame_count * canonical_rate / frame_rate))
+duration_seconds  = target_length / canonical_rate
+```
+
+using the Analysis's own persisted
+`effective_configuration.canonicalization.sample_rate_hz` as
+`canonical_rate`. Malformed or non-positive WAV timing metadata is an
+audition processing failure (sanitized 500 `internal_error`), never a
+partial or best-effort body.
+
+### Bounded response delivery (independent guardrails)
+
+| Guardrail | Default | Constant |
+|---|---:|---|
+| Max single audition duration | 600 seconds | `application.query_analysis.DEFAULT_MAX_AUDIO_AUDITION_DURATION_SECONDS` |
+| Max single audition response body | 64 MiB | `application.query_analysis.DEFAULT_MAX_AUDIO_AUDITION_RESPONSE_BYTES` |
+
+A canonical Cue duration strictly greater than the duration guardrail is
+rejected with 413 `resource_limit_exceeded` **before** any FFmpeg render
+call for the occurrence route (so one occurrence request can never ask
+FFmpeg to emit an unbounded source segment), and before the Cue bytes are
+returned for the Cue route. A response body (the original Cue bytes, or
+the rendered occurrence WAV) strictly larger than the byte guardrail is
+also rejected with 413 `resource_limit_exceeded`, before any bytes are
+written to the response. Exact equality at either bound is allowed — only
+a value strictly *greater* than the configured maximum is rejected.
+
+These guardrails are independent response-*delivery* bounds: they never
+change the existing source/Cue upload-size limit, source/Cue
+matching-duration limit, or Asset retention policy, and S0013 adds no
+environment-variable configuration surface for them (see
+`docs/supported-media-and-limits.md`).
+
+### No new `ErrorCode` or public error family
+
+S0013 reuses the existing closed `ErrorCode` catalog exactly:
+
+| Application exception | `error_code` | HTTP status |
+|---|---|---:|
+| `application.query_analysis.AuditionTargetNotFoundError` | `resource_not_found` | 404 |
+| `application.query_analysis.AudioAuditionResourceLimitError` | `resource_limit_exceeded` | 413 |
+| `application.query_analysis.AudioAuditionRenderingError` | `internal_error` (unmapped, generic catch-all) | 500 |
+
+`AudioAuditionRenderingError` is deliberately left out of `errors.
+_EXCEPTION_STATUS_MAP`, exactly like `AnalysisResultIntegrityError`: the
+existing catch-all `Exception` handler already translates it to the
+sanitized `internal_error` response without ever exposing FFmpeg stderr or
+a physical temporary path.
+
+### Storage/persistence safety
+
+Every audition response is transient: the renderer writes its temporary
+input/output exclusively inside one `tempfile.TemporaryDirectory()` for
+the duration of one request and returns bytes, never a path. No audition
+call writes to `AssetStoragePort`, registers a new owned Asset
+(`AnalysisRepositoryPort.add_owned_asset` is never called for an
+audition), or touches Result storage. Retention/cleanup policy
+(`docs/artifact-retention-and-cleanup-policy.md`) is unchanged; once
+S0011/S0012 delete the required source/Cue bytes, audition simply becomes
+unavailable (`AssetNotFoundError` → 404 `resource_not_found`) while the
+persisted Analysis/Result remain queryable exactly as before.
+
 ## Identifier and timestamp conventions
 
 - Every identifier (`Asset.identifier`, `Analysis.analysis_id`,
@@ -654,11 +817,14 @@ FAILED Analysis or an Error response.
 `app.create_app()` registers `AssetCreateRequest`, `AssetPublic`,
 `AnalysisCreateRequest`, `AnalysisPublic`, `AnalysisResultEnvelope`, and
 (M5-02) `ErrorPublic` (plus their nested enums/models) into the generated
-OpenAPI document's `components.schemas`, alongside the six routes this
+OpenAPI document's `components.schemas`, alongside the eight routes this
 project now defines (`/api/v1/health`, M5-03's two upload routes, M5-04's
-Analysis creation route, and M5-05's status and Result routes). This keeps
-the contract reviewable and renderable from the executable route/schema
-definitions.
+Analysis creation route, M5-05's status and Result routes, and S0013's two
+audition routes). The audition routes document their `200` response as
+raw `audio/wav` binary content (`{"type": "string", "format": "binary"}`),
+not a JSON transport schema — no new Pydantic model is introduced for
+them. This keeps the contract reviewable and renderable from the
+executable route/schema definitions.
 
 ## Non-goals of this document
 
@@ -672,3 +838,11 @@ policy, or add resumable uploads, streaming analysis, object storage,
 distributed queues/brokers/remote workers, Analysis cancellation, bulk
 creation, Analysis listing, or arbitrary/client-controlled destination
 paths — all explicitly out of M5-02's, M5-03's, and M5-04's scope.
+
+S0013's audition endpoints likewise do not add a generic `GET
+/api/v1/assets/{asset_id}` download route, an arbitrary client-supplied
+start/end/duration parameter, HTTP Range/partial-content (206) support, a
+streaming media server, persistent preview Assets or a preview cache, a
+new volume/directory under `/app/var`, play/pause/seek/volume UI (S0014's
+scope), or any change to `Occurrence.end`, the Result schema, matching
+behavior, or Asset retention windows.

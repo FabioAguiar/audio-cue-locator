@@ -48,6 +48,19 @@ OPERATION_MATRIX = {
         "success": ("200", "AnalysisResultEnvelope"),
         "errors": ("404", "409", "500"),
     },
+    ("/api/v1/analyses/{analysis_id}/cues/{cue_id}/audio", "get"): {
+        "success": ("200", None),
+        "success_content_type": "audio/wav",
+        "errors": ("404", "409", "413", "500"),
+    },
+    (
+        "/api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio",
+        "get",
+    ): {
+        "success": ("200", None),
+        "success_content_type": "audio/wav",
+        "errors": ("404", "409", "413", "500"),
+    },
 }
 
 PUBLIC_SCHEMA_REQUIRED_FIELDS = {
@@ -77,10 +90,10 @@ PUBLIC_SCHEMA_REQUIRED_FIELDS = {
 }
 
 
-def _response_schema(operation: dict, status_code: str) -> dict:
-    return operation["responses"][status_code]["content"]["application/json"][
-        "schema"
-    ]
+def _response_schema(
+    operation: dict, status_code: str, content_type: str = "application/json"
+) -> dict:
+    return operation["responses"][status_code]["content"][content_type]["schema"]
 
 
 def test_generated_openapi_contains_the_complete_v1_operation_matrix():
@@ -100,12 +113,17 @@ def test_generated_openapi_contains_the_complete_v1_operation_matrix():
     for (path, method), contract in OPERATION_MATRIX.items():
         operation = document["paths"][path][method]
         success_status, success_model = contract["success"]
+        success_content_type = contract.get("success_content_type", "application/json")
         assert success_status in operation["responses"]
-        success_schema = _response_schema(operation, success_status)
+        success_schema = _response_schema(operation, success_status, success_content_type)
         if success_model is not None:
             assert success_schema == {
                 "$ref": f"#/components/schemas/{success_model}"
             }
+        elif success_content_type != "application/json":
+            # S0013's audition endpoints: a bounded binary body, not a
+            # public transport schema.
+            assert success_schema == {"type": "string", "format": "binary"}
 
         for error_status in contract["errors"]:
             assert error_status in operation["responses"], (
@@ -285,8 +303,26 @@ def test_rest_package_keeps_adapters_inside_the_documented_composition_root():
     assert composition_imports == {
         "audio_cue_locator.infrastructure.analysis_repository.sqlite_repository",
         "audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage",
+        "audio_cue_locator.infrastructure.asset_storage.retention_policy",
         "audio_cue_locator.infrastructure.execution.local_analysis_executor",
+        "audio_cue_locator.infrastructure.execution.restart_recovery",
+        "audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter",
     }
+
+
+def test_no_generic_asset_download_route_exists():
+    """S0013 acceptance: the audition endpoints are Analysis/Cue/occurrence
+    scoped; no generic ``GET /assets/{asset_id}`` (or any other bare Asset
+    read-by-id) route is ever published."""
+
+    document = app_module.create_app().openapi()
+
+    for path, path_item in document["paths"].items():
+        if not path.startswith("/api/v1/assets"):
+            continue
+        assert "get" not in path_item, (
+            f"unexpected generic Asset-read route: GET {path}"
+        )
 
 
 @pytest.mark.parametrize(

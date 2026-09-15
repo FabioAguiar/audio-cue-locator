@@ -38,6 +38,15 @@ new `ErrorCode`/status -- see `docs/supported-media-and-limits.md`).
 `application.ports.analysis_repository.InvalidAnalysisRecordError`/
 `AnalysisAlreadyExistsError` are already mapped by `errors.py` and are left
 to propagate unchanged; this module does not catch them.
+
+S0013 adds two bounded binary audition routes -- `GET .../cues/{cue_id}/audio`
+and `GET .../cues/{cue_id}/occurrences/{occurrence_index}/audio` -- both
+delegating entirely to `application.query_analysis.QueryAnalysisUseCase`'s
+new `get_cue_audition`/`get_occurrence_audition` methods. These are audition
+endpoints, not a generic Asset download route: no query parameter accepts a
+client-supplied media location, start time, or duration, and every
+Application audition exception these methods raise is already mapped by
+`errors.py` to an existing public error family (no new `ErrorCode`).
 """
 
 from __future__ import annotations
@@ -53,7 +62,10 @@ from audio_cue_locator.application.create_analysis import (
     MediaDurationExceededError,
     TooManyCuesError,
 )
-from audio_cue_locator.application.query_analysis import QueryAnalysisUseCase
+from audio_cue_locator.application.query_analysis import (
+    AudioAuditionPayload,
+    QueryAnalysisUseCase,
+)
 from audio_cue_locator.interfaces.rest_api.errors import (
     ResourceLimitExceededError,
     UnsupportedMediaError,
@@ -77,6 +89,20 @@ _STATUS_ERROR_RESPONSES = {
 _RESULT_ERROR_RESPONSES = {
     **_STATUS_ERROR_RESPONSES,
     status.HTTP_409_CONFLICT: {"model": ErrorPublic},
+}
+_AUDITION_SUCCESS_RESPONSE = {
+    status.HTTP_200_OK: {
+        "content": {"audio/wav": {"schema": {"type": "string", "format": "binary"}}},
+        "description": "Bounded, transient WAV audition audio.",
+    },
+}
+_AUDITION_ERROR_RESPONSES = {
+    **_RESULT_ERROR_RESPONSES,
+    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: {"model": ErrorPublic},
+}
+_AUDITION_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
 }
 
 
@@ -130,6 +156,32 @@ def build_analysis_router(
         )
         def get_analysis_result(analysis_id: str) -> AnalysisResultEnvelope:
             return _get_analysis_result(analysis_id, query_use_case)
+
+        @router.get(
+            "/analyses/{analysis_id}/cues/{cue_id}/audio",
+            response_class=Response,
+            status_code=status.HTTP_200_OK,
+            summary="Audition the original Cue WAV bytes for a completed Analysis",
+            responses={**_AUDITION_SUCCESS_RESPONSE, **_AUDITION_ERROR_RESPONSES},
+            tags=["v1"],
+        )
+        def get_cue_audio(analysis_id: str, cue_id: str) -> Response:
+            return _get_cue_audio(analysis_id, cue_id, query_use_case)
+
+        @router.get(
+            "/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio",
+            response_class=Response,
+            status_code=status.HTTP_200_OK,
+            summary="Audition the source-time window for one Result occurrence",
+            responses={**_AUDITION_SUCCESS_RESPONSE, **_AUDITION_ERROR_RESPONSES},
+            tags=["v1"],
+        )
+        def get_occurrence_audio(
+            analysis_id: str, cue_id: str, occurrence_index: int
+        ) -> Response:
+            return _get_occurrence_audio(
+                analysis_id, cue_id, occurrence_index, query_use_case
+            )
 
     return router
 
@@ -185,3 +237,42 @@ def _get_analysis_result(
     """Map one lifecycle-gated canonical Result to the versioned envelope."""
 
     return analysis_result_to_envelope(use_case.get_result(analysis_id))
+
+
+def _audition_response(payload: AudioAuditionPayload) -> Response:
+    """Wrap one bounded audition payload with the S0013 safe delivery
+    headers. Never includes a client-supplied filename in
+    `Content-Disposition`; `Content-Length` is generated from the bounded
+    in-memory body by `Response` itself."""
+
+    return Response(
+        content=payload.content,
+        media_type=payload.media_type,
+        headers=dict(_AUDITION_HEADERS),
+    )
+
+
+def _get_cue_audio(
+    analysis_id: str, cue_id: str, use_case: QueryAnalysisUseCase
+) -> Response:
+    """Return the complete original Cue WAV bytes for one completed
+    Analysis Cue. Not a generic Asset download: ownership is resolved only
+    from the requested Analysis, never from a client-supplied Asset id."""
+
+    return _audition_response(use_case.get_cue_audition(analysis_id, cue_id))
+
+
+def _get_occurrence_audio(
+    analysis_id: str,
+    cue_id: str,
+    occurrence_index: int,
+    use_case: QueryAnalysisUseCase,
+) -> Response:
+    """Return the rendered source-time window for one zero-based Result
+    occurrence. Accepts no query parameter controlling media location,
+    start time, or duration -- every value is server-derived from the
+    persisted Analysis and its completed Result."""
+
+    return _audition_response(
+        use_case.get_occurrence_audition(analysis_id, cue_id, occurrence_index)
+    )

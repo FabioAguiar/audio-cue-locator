@@ -26,8 +26,10 @@ writes the decoded audio stream to a WAV file.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -124,6 +126,108 @@ class FFmpegMediaAdapter:
             sample_rate=probe_result.sample_rate,
             channels=probe_result.channels,
         )
+
+    def render_wav_segment(
+        self,
+        media_bytes: bytes,
+        *,
+        start_seconds: float,
+        duration_seconds: float,
+        sample_rate_hz: int,
+    ) -> bytes:
+        """Render one bounded mono PCM16 WAV segment from ``media_bytes``
+        (S0013): structurally satisfies ``application.query_analysis.
+        AudioAuditionRendererPort`` without that module importing this
+        concrete adapter.
+
+        Reuses ``self.probe`` to select the existing audio stream exactly
+        like `extract_audio`, then requests accurate output seeking (`-ss`/
+        `-t` as ffmpeg *output* options, after `-i`) rather than
+        keyframe-only approximate input seeking, so the rendered segment
+        starts at the exact requested sample rather than the nearest
+        keyframe. Every temporary input/output file lives inside one
+        `tempfile.TemporaryDirectory()` for the duration of this call only;
+        no path is logged or returned. Applies no amplitude normalization --
+        only the channel/sample-rate conversion needed for stable browser
+        playback.
+        """
+
+        self._validate_segment_render_inputs(
+            media_bytes, start_seconds, duration_seconds, sample_rate_hz
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.media"
+            output_path = Path(tmp_dir) / "preview.wav"
+            input_path.write_bytes(bytes(media_bytes))
+
+            probe_result = self.probe(str(input_path))
+            if not probe_result.has_audio_stream:
+                raise NoAudioStreamError(
+                    "media has no audio stream for audition rendering"
+                )
+
+            command = [
+                self._ffmpeg_path,
+                "-y",
+                "-v", "error",
+                "-i", str(input_path),
+                "-ss", str(float(start_seconds)),
+                "-t", str(float(duration_seconds)),
+                "-vn",
+                "-map", f"0:{probe_result.audio_stream_index}",
+                "-ac", "1",
+                "-ar", str(int(sample_rate_hz)),
+                "-c:a", "pcm_s16le",
+                str(output_path),
+            ]
+            self._run(command)
+
+            return output_path.read_bytes()
+
+    @staticmethod
+    def _validate_segment_render_inputs(
+        media_bytes: Any,
+        start_seconds: Any,
+        duration_seconds: Any,
+        sample_rate_hz: Any,
+    ) -> None:
+        """Reject invalid `render_wav_segment` inputs before any subprocess
+        runs, using this adapter's existing error vocabulary."""
+
+        if (
+            not isinstance(media_bytes, (bytes, bytearray, memoryview))
+            or len(media_bytes) == 0
+        ):
+            raise InvalidMediaError(
+                "render_wav_segment requires non-empty bytes-like media"
+            )
+        if isinstance(start_seconds, bool) or not isinstance(
+            start_seconds, (int, float)
+        ):
+            raise InvalidMediaError("render_wav_segment start_seconds must be a number")
+        if not math.isfinite(start_seconds) or start_seconds < 0:
+            raise InvalidMediaError(
+                "render_wav_segment start_seconds must be finite and >= 0"
+            )
+        if isinstance(duration_seconds, bool) or not isinstance(
+            duration_seconds, (int, float)
+        ):
+            raise InvalidMediaError(
+                "render_wav_segment duration_seconds must be a number"
+            )
+        if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+            raise InvalidMediaError(
+                "render_wav_segment duration_seconds must be finite and > 0"
+            )
+        if isinstance(sample_rate_hz, bool) or not isinstance(sample_rate_hz, int):
+            raise InvalidMediaError(
+                "render_wav_segment sample_rate_hz must be an integer"
+            )
+        if sample_rate_hz <= 0:
+            raise InvalidMediaError(
+                "render_wav_segment sample_rate_hz must be positive"
+            )
 
     def _run(self, command: Sequence[str]) -> subprocess.CompletedProcess:
         try:

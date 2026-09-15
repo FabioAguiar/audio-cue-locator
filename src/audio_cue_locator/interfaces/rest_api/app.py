@@ -625,7 +625,19 @@ def _build_analysis_use_cases(
         max_cue_media_duration_seconds=_max_cue_media_duration_seconds(),
         reserve_asset_ids=coordinator.reserve,
     )
-    query_use_case = QueryAnalysisUseCase(repository, result_store)
+    # S0013: the audition renderer reuses this same `media_adapter` instance
+    # -- never a second Asset Storage root or an independently configured
+    # FFmpeg timeout policy -- so audition rendering inherits the exact
+    # `AUDIO_CUE_LOCATOR_FFMPEG_TIMEOUT_SECONDS` already applied to Analysis
+    # media processing above. S0013 adds no environment configuration
+    # surface, so the audition duration/response-byte guardrails are left at
+    # `QueryAnalysisUseCase`'s own fixed defaults.
+    query_use_case = QueryAnalysisUseCase(
+        repository,
+        result_store,
+        asset_storage=storage,
+        audition_renderer=media_adapter,
+    )
 
     # S0011: constructed from the same repository/storage/coordinator this
     # function just built, but not started here -- `_build_analysis_use_cases`

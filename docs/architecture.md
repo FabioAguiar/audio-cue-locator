@@ -639,6 +639,29 @@ configuração
 
 A política de múltiplas ocorrências ainda precisa ser validada, mas o modelo arquitetural deve suportá-la sem exigir mudança estrutural posterior.
 
+### Fluxo de audição de áudio (S0013)
+
+```text
+WebUI
+→ rota REST de audição escopada à Analysis
+→ Application QueryAnalysisUseCase (get_cue_audition / get_occurrence_audition)
+→ AssetStoragePort + AudioAuditionRendererPort
+→ FFmpegMediaAdapter existente (render_wav_segment)
+→ resposta WAV transitória
+```
+
+Este fluxo reutiliza integralmente as fronteiras já fixadas por este
+documento: o Core continua sem dependência HTTP; a rota REST
+(`interfaces/rest_api/analysis_routes.py`) não importa Infrastructure,
+apenas o `AudioAuditionRendererPort` que a própria Application declara;
+FFmpeg continua sendo a única fronteira de Infrastructure para
+probe/decode/extração de áudio (`FFmpegMediaAdapter`, único ponto de
+execução de `ffmpeg`/`ffprobe` no projeto); e o preview gerado é
+derivado/transitório, nunca persistido em `AssetStoragePort`, no
+Analysis Repository, ou no Result. Não existe rota genérica de download de
+Asset por identificador; toda audição é derivada exclusivamente da
+Analysis e do Result já persistidos e completos.
+
 ### Fluxo futuro de referência externa
 
 Não faz parte do baseline implementado, mas a fronteira deve permitir:
@@ -786,6 +809,19 @@ Podem incluir:
 - caches numéricos.
 
 Esses artifacts não devem ser preservados indefinidamente por padrão. Uma política de retenção e cleanup deverá ser definida.
+
+**Decisão (S0013):** o WAV de audição de uma occurrence, gerado por
+`FFmpegMediaAdapter.render_wav_segment`, é o exemplo concreto mais estrito
+desta categoria -- existe apenas dentro de um
+`tempfile.TemporaryDirectory()` durante o processamento de uma requisição
+HTTP e nunca sobrevive além dela. Ele nunca é escrito em
+`AssetStoragePort`, nunca é registrado via
+`AnalysisRepositoryPort.add_owned_asset`, e nunca é alcançado pelas
+políticas de retenção S0011/S0012 (que operam apenas sobre Assets
+persistidos). Quando os bytes de origem/cue necessários já foram removidos
+por retenção, a audição simplesmente deixa de estar disponível
+(`resource_not_found`), enquanto a Analysis e o Result persistidos
+continuam consultáveis normalmente.
 
 ### Logs e métricas
 

@@ -13,6 +13,7 @@ import asyncio
 import importlib
 import io
 import json
+import shutil
 import struct
 import threading
 import wave
@@ -35,6 +36,9 @@ orchestration = importlib.import_module(
 )
 _REAL_BUILD_ANALYSIS_USE_CASES = app_module._build_analysis_use_cases
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+_FFMPEG_UNAVAILABLE = shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None
+_FFMPEG_SKIP_REASON = "ffmpeg/ffprobe not available in this environment"
 
 
 def _run(coro: Coroutine[Any, Any, Any]) -> Any:
@@ -763,4 +767,196 @@ def test_duration_aware_invalid_source_window_returns_sanitized_error_and_persis
                     "audio_cue_locator.core.analysis_lifecycle"
                 ).AnalysisLifecycleState.QUEUED
             ) == ()
+        _shutdown(executors)
+
+
+# --- S0013: Analysis audio audition API and bounded preview delivery -------
+
+
+def test_cue_audition_endpoint_returns_original_bytes_with_safe_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    case = _manifest_case("found_offset_near_start")
+    cue_bytes = _wav_bytes(case["cue"])
+    app, executors = _build_test_app(monkeypatch, tmp_path, "audition-cue")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(case["source"]),
+                filename="source.wav",
+            )
+            cue = await _upload(
+                client, "/api/v1/assets/cue", cue_bytes, filename="cue.wav"
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            analysis_id = created.json()["analysis_id"]
+            location = created.headers["location"]
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+
+            cue_audio = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/audio"
+            )
+            assert cue_audio.status_code == 200, cue_audio.text
+            assert cue_audio.content == cue_bytes
+            assert cue_audio.content[:4] == b"RIFF"
+            assert cue_audio.content[8:12] == b"WAVE"
+            assert cue_audio.headers["content-type"] == "audio/wav"
+            assert cue_audio.headers["cache-control"] == "no-store"
+            assert cue_audio.headers["x-content-type-options"] == "nosniff"
+
+            unknown_cue = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/unknown-cue/audio"
+            )
+            _assert_error(unknown_cue, 404, "resource_not_found")
+
+            unknown_analysis = await client.get(
+                "/api/v1/analyses/00000000-0000-4000-8000-000000000099"
+                "/cues/cue-1/audio"
+            )
+            _assert_error(unknown_analysis, 404, "resource_not_found")
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
+@pytest.mark.skipif(_FFMPEG_UNAVAILABLE, reason=_FFMPEG_SKIP_REASON)
+def test_occurrence_audition_endpoint_renders_a_valid_wav_with_safe_headers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0013 acceptance: occurrence audition renders through the real
+    FFmpeg boundary (`FFmpegMediaAdapter.render_wav_segment`), so this
+    scenario is skipped, never mocked, when ffmpeg/ffprobe are unavailable
+    -- mirroring this repository's existing FFmpeg-backed skip convention
+    (`tests/e2e/test_m7_baseline.py`)."""
+
+    case = _manifest_case("found_offset_near_start")
+    app, executors = _build_test_app(monkeypatch, tmp_path, "audition-occurrence")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(case["source"]),
+                filename="source.wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(case["cue"]),
+                filename="cue.wav",
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            analysis_id = created.json()["analysis_id"]
+            location = created.headers["location"]
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+
+            result_response = await client.get(f"{location}/result")
+            assert result_response.status_code == 200, result_response.text
+            outcome = result_response.json()["result"]["cues"][0]["outcome"]
+            assert outcome["kind"] == "occurrences"
+
+            occurrence_audio = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/occurrences/0/audio"
+            )
+            assert occurrence_audio.status_code == 200, occurrence_audio.text
+            body = occurrence_audio.content
+            assert body[:4] == b"RIFF"
+            assert body[8:12] == b"WAVE"
+            assert len(body) > 0
+            assert occurrence_audio.headers["content-type"] == "audio/wav"
+            assert occurrence_audio.headers["cache-control"] == "no-store"
+            assert occurrence_audio.headers["x-content-type-options"] == "nosniff"
+
+            unknown_index = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/occurrences/99/audio"
+            )
+            _assert_error(unknown_index, 404, "resource_not_found")
+
+            negative_index = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/occurrences/-1/audio"
+            )
+            _assert_error(negative_index, 404, "resource_not_found")
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
+def test_audition_endpoints_reject_a_nonterminal_analysis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0013 lifecycle-gate acceptance: a QUEUED/RUNNING Analysis reuses the
+    existing `result_not_ready` 409 for both Cue and occurrence audition,
+    without any new ErrorCode. The FAILED-Analysis and per-cue lifecycle
+    branches already have direct Application-level coverage in
+    `tests/test_api_analysis_queries.py`."""
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_match_cue = orchestration.match_cue_occurrences
+
+    def _gated_match(source, cue, configuration):
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test gate was not released")
+        return real_match_cue(source, cue, configuration)
+
+    monkeypatch.setattr(orchestration, "match_cue_occurrences", _gated_match)
+    case = _manifest_case("found_offset_near_start")
+    app, executors = _build_test_app(monkeypatch, tmp_path, "audition-lifecycle")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(case["source"]),
+                filename="source.wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(case["cue"]),
+                filename="cue.wav",
+            )
+            created = await _create_analysis(
+                client, source["identifier"], [cue["identifier"]]
+            )
+            assert created.status_code == 202, created.text
+            analysis_id = created.json()["analysis_id"]
+            assert entered.wait(timeout=2)
+
+            pending_cue_audio = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/audio"
+            )
+            _assert_error(pending_cue_audio, 409, "result_not_ready")
+
+            pending_occurrence_audio = await client.get(
+                f"/api/v1/analyses/{analysis_id}/cues/cue-1/occurrences/0/audio"
+            )
+            _assert_error(pending_occurrence_audio, 409, "result_not_ready")
+
+            release.set()
+            terminal = await _poll_terminal(client, created.headers["location"])
+            assert terminal["status"] == "succeeded"
+
+    try:
+        _run(_scenario())
+    finally:
+        release.set()
         _shutdown(executors)

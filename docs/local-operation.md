@@ -218,6 +218,37 @@ This is a destructive, whole-volume reset, not routine cleanup: it also
 removes Analysis-owned and still-within-grace-window unreferenced Assets
 that the two cleanup rules above would otherwise have preserved.
 
+### Audio audition transient disk use (S0013)
+
+`GET /api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio`
+(`docs/rest-api-v1-contract.md`, "Analysis Cue/occurrence audio audition")
+renders its bounded WAV segment through the existing FFmpeg boundary. While
+handling one such request, the `api` process:
+
+- may temporarily use disk space under the process's own operating-system
+  temporary directory (a private `tempfile.TemporaryDirectory()` per
+  request) to hold the source-media input and the rendered WAV output
+  FFmpeg needs on a real filesystem path;
+- does **not** add any file to `/app/var/asset_storage`;
+- does **not** add a row, an owned-Asset reference, or any other
+  persisted state to the Analysis Repository (`owned_asset_ids` is never
+  extended for an audition);
+- deletes that temporary input/output automatically when the request's
+  renderer call returns, whether it succeeds or fails -- nothing here
+  survives past the single HTTP request that created it.
+
+This temporary location is an internal renderer implementation detail, not
+part of the public API surface: no route, response header, or documented
+contract ever exposes its path, and an operator should not rely on it for
+anything beyond the duration of one in-flight request.
+
+Audition (both the Cue and the occurrence route) becomes unavailable --
+returning the existing 404 `resource_not_found` response -- once the
+source/Cue retention cleanup rules above ("Local storage") have already
+deleted the required bytes, even though the persisted Analysis and its
+Result remain queryable exactly as before. S0013 does not extend either
+cleanup rule's eligibility window to keep audition available longer.
+
 ## Shutdown
 
 ```bash
