@@ -55,6 +55,9 @@ interface ResultEnvelope {
       cue_id: string;
       outcome: {
         kind: "occurrences" | "no_match" | "failure";
+        occurrences?: Array<{
+          score: number;
+        }>;
       };
     }>;
   };
@@ -448,6 +451,12 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(page.getByPlaceholder("e.g. Notification sound")).toBeVisible();
     await expect(page.getByPlaceholder("e.g. 00:00:01")).toBeVisible();
     await expect(page.getByPlaceholder("e.g. 00:00:03")).toBeVisible();
+    await expect(
+      page.getByText(
+        "Start and End are positions inside this cue file, not the source media.",
+        { exact: true },
+      ),
+    ).toHaveCount(0);
 
     await page.getByRole("button", { name: "Add another cue" }).click();
     await expect(page.getByLabel("Cue 2", { exact: true })).toBeAttached();
@@ -486,10 +495,9 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(page.getByText("Creating…", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Analyzing…", { exact: true })).toHaveCount(0);
 
-    // Raw scores are never presented as confidence or a percentage.
+    // Scores are never presented as confidence or a percentage.
     const resultsText = (await page.locator(".results-panel").innerText()).toLowerCase();
     expect(resultsText).not.toMatch(/confidence/);
-    expect(resultsText).not.toMatch(/\d%/);
     expect(page.getByText(/^Status: /)).toHaveCount(0);
 
     const responseBodies = await resolvedResultBodies(resultBodies);
@@ -507,6 +515,30 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
         (cue) => cue.outcome.kind === "occurrences",
       ),
     ).toBe(true);
+
+    const rawScores = envelope.result.cues.flatMap((cue) =>
+      cue.outcome.kind === "occurrences"
+        ? (cue.outcome.occurrences ?? []).map((occurrence) => occurrence.score)
+        : [],
+    );
+    const scoreBadges = page.locator(".occurrence-score-badge");
+    expect(rawScores.length).toBeGreaterThan(0);
+    await expect(scoreBadges).toHaveCount(rawScores.length);
+    for (let index = 0; index < rawScores.length; index += 1) {
+      const rawScore = rawScores[index];
+      expect(Number.isFinite(rawScore)).toBe(true);
+      await expect(scoreBadges.nth(index)).toHaveText(
+        /^Similarity score: -?\d+\.\d{2}$/,
+      );
+      await expect(scoreBadges.nth(index)).not.toContainText("%");
+      await expect(scoreBadges.nth(index)).toHaveAttribute(
+        "title",
+        `Raw similarity score: ${rawScore}`,
+      );
+      await expect(scoreBadges.nth(index)).toHaveText(
+        `Similarity score: ${rawScore.toFixed(2)}`,
+      );
+    }
 
     const downloadPromise = page.waitForEvent("download");
     await downloadButton.click();

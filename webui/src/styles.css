@@ -698,9 +698,13 @@ input:disabled {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.acl-activity__scanner circle,
+.acl-activity__scanner path {
+  stroke-width: 4;
+}
 .acl-activity__scanner {
   left: 4px;
-  top: 0;
+  top: 7px;
   color: #7144e6;
   animation: acl-locate-scan 2.2s linear infinite;
 }

@@ -484,10 +484,6 @@ export default function NewAnalysisPage(): JSX.Element {
                           }
                         />
                       </label>
-                      <p className="cue-file-help">
-                        Start and End are positions inside this cue file, not
-                        the source media.
-                      </p>
                       <label>
                         <span>
                           Start time <em>(optional)</em>

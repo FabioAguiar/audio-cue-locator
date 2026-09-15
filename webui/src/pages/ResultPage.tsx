@@ -22,8 +22,9 @@ import {
  * the exact raw response text captured by `downloadResult.ts` -- never a
  * re-serialization of the parsed object.
  *
- * Every score is presented as a raw similarity value next to its matching
- * method, never as "confidence" or a percentage. `no_match`, cue-level
+ * Every score is presented as a two-decimal similarity value next to its
+ * matching method, while the badge title retains the raw score. Scores are
+ * never presented as "confidence" or a percentage. `no_match`, cue-level
  * `failure`, and Analysis-level `failed` are rendered as three distinct,
  * never-conflated outcomes.
  */
@@ -75,7 +76,7 @@ function OccurrenceItem({
         className="occurrence-score-badge"
         title={`Raw similarity score: ${occurrence.score}`}
       >
-        Similarity score: {occurrence.score}
+        Similarity score: {occurrence.score.toFixed(2)}
       </span>
       <span>Method: {occurrence.matching_method}</span>
     </li>
