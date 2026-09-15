@@ -348,10 +348,10 @@ def test_existing_m4_03_row_migrates_with_empty_owned_assets(tmp_path: Path):
     assert record.owned_asset_ids == ()
 
 
-# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+# --- Cue labels and optional per-Cue source-search windows -------------------
 
 
-def test_cue_label_and_trim_bounds_survive_create_get_round_trip(tmp_path: Path):
+def test_cue_label_and_source_window_bounds_survive_create_get_round_trip(tmp_path: Path):
     database_path = tmp_path / "analyses.sqlite"
     cue = CueAssetReference(
         cue_id="cue-1",
@@ -372,7 +372,7 @@ def test_cue_label_and_trim_bounds_survive_create_get_round_trip(tmp_path: Path)
     assert persisted.cues[0].trim_end_seconds == 3.25
 
 
-def test_cue_label_and_trim_bounds_survive_transition_reopen(tmp_path: Path):
+def test_cue_label_and_source_window_bounds_survive_transition_reopen(tmp_path: Path):
     database_path = tmp_path / "analyses.sqlite"
     cue = CueAssetReference(
         cue_id="cue-1",

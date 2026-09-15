@@ -32,30 +32,26 @@ indeterminate. With `prefers-reduced-motion: reduce`, continuous bar and
 magnifier movement is disabled while the static themed artwork and semantic
 phase text remain visible.
 
-### Cue Start/End: Cue-local bounds, not source-media bounds (S0005)
+### Cue Start/End: per-Cue source search windows (S0008)
 
 A cue's optional `Start time`/`End time` (`trim_start_seconds`/
-`trim_end_seconds`) are positions **inside that cue's own audio file**, not
-positions inside the source media being searched -- they never constrain
-where in the source media a match may be found
-(`specs/S0005-cue-trim-validation-clarity-and-analysis-creation-regression/
-spec.md`). The WebUI states this explicitly next to the Start/End fields,
-and their placeholder examples (`e.g. 00:00:01` / `e.g. 00:00:03`) are
-short, Cue-scale values rather than source-media-scale ones -- they are
-examples, never defaults, and neither field is ever pre-populated.
+`trim_end_seconds`) constrain where that complete Cue is searched on the
+source-media timeline. The names are retained for API compatibility. Neither
+field is pre-populated: blank/blank searches the full source, End only searches
+`[0, End)`, Start only searches `[Start, source end)`, and both search
+`[Start, End)`.
 
-Leaving both fields blank uses the cue's full duration; this is the normal
-case and is not an error. `Start`/`End` accept only `MM:SS`, `MM:SS.fraction`,
+Leaving both fields blank searches the full source and is not an error.
+`Start`/`End` accept only `MM:SS`, `MM:SS.fraction`,
 `HH:MM:SS`, or `HH:MM:SS.fraction` (S0004); this presentation-layer parsing
 and the existing start-before-end cross-field check are local convenience
 only and do not replace backend validation. The backend remains the sole
-authoritative check for whether a bound actually falls within the cue's real
-decoded duration -- the WebUI never decodes cue audio itself (no
-`AudioContext`/`HTMLAudioElement` probing, no manual WAV/RIFF duration
-parsing) to duplicate that check. When the server rejects a request with
+authoritative check for whether a bound actually falls within the canonical
+source duration -- the WebUI does not decode media to duplicate that check.
+When the server rejects a request with
 `error_code: validation_error` and at least one Start/End field was not
 left blank, the WebUI shows an additional, explicitly conditional advisory
-suggesting the user verify the Cue-local bounds against that cue's own
+suggesting the user verify the source search interval against the source
 duration; it never claims certainty about the server's exact cause, and it
 is never shown when every Start/End field was blank.
 

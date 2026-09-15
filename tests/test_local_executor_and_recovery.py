@@ -1,5 +1,6 @@
 """Deterministic M4 local-executor, failure, and restart-recovery coverage."""
 
+import json
 import threading
 from concurrent.futures import Future
 from datetime import datetime, timezone
@@ -21,7 +22,9 @@ from audio_cue_locator.core.analysis_result import (
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
     SQLiteAnalysisRepository,
 )
+from audio_cue_locator.infrastructure.acoustic_matching import MatchOutcome, MatchResult
 from audio_cue_locator.infrastructure.execution.local_analysis_executor import (
+    InMemoryResultReferenceStore,
     LocalAnalysisExecutor,
 )
 from audio_cue_locator.infrastructure.execution.restart_recovery import (
@@ -58,11 +61,16 @@ def _configuration() -> EffectiveConfigurationSnapshot:
     )
 
 
-def _create_analysis(repository: SQLiteAnalysisRepository, analysis_id: str) -> None:
+def _create_analysis(
+    repository: SQLiteAnalysisRepository,
+    analysis_id: str,
+    *,
+    cues: tuple[CueAssetReference, ...] | None = None,
+) -> None:
     repository.create(
         analysis_id=analysis_id,
         source_asset_id=_asset_id(),
-        cues=(CueAssetReference(cue_id="cue-1", asset_id=_asset_id()),),
+        cues=cues or (CueAssetReference(cue_id="cue-1", asset_id=_asset_id()),),
         effective_configuration=_configuration(),
         queued_at=QUEUED_AT,
     )
@@ -180,6 +188,66 @@ def test_submit_runs_outside_caller_and_enforces_configured_concurrency(
         outcome.final_state is AnalysisLifecycleState.SUCCEEDED
         for outcome in outcomes
     )
+
+
+def test_executor_uses_persisted_per_cue_source_windows_and_publishes_absolute_time(
+    tmp_path: Path, monkeypatch
+):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    database_path = tmp_path / "analyses.sqlite"
+    with SQLiteAnalysisRepository(database_path) as repository:
+        _create_analysis(
+            repository,
+            "windowed-analysis",
+            cues=(
+                CueAssetReference(cue_id="cue-full", asset_id=_asset_id()),
+                CueAssetReference(
+                    cue_id="cue-windowed",
+                    asset_id=_asset_id(),
+                    trim_start_seconds=4 / 48_000,
+                    trim_end_seconds=10 / 48_000,
+                ),
+            ),
+        )
+
+    source = np.arange(12, dtype=np.float32)
+    cues = {
+        "cue-full": np.asarray([0.1, 0.2], dtype=np.float32),
+        "cue-windowed": np.asarray([0.3, 0.4], dtype=np.float32),
+    }
+    seen_sources: list[np.ndarray] = []
+
+    def _found(source_window, cue, configuration):
+        seen_sources.append(source_window)
+        return MatchResult(
+            outcome=MatchOutcome.FOUND,
+            configuration=configuration,
+            timestamp_seconds=2 / 48_000,
+            score=0.9,
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue", _found)
+    result_store = InMemoryResultReferenceStore()
+    executor = LocalAnalysisExecutor(
+        _OpeningRepository(database_path),
+        max_concurrency=1,
+        result_store=result_store,
+    )
+    try:
+        outcome = executor.submit("windowed-analysis", source, cues).result(timeout=5)
+    finally:
+        executor.shutdown()
+
+    assert seen_sources[0] is source
+    assert np.array_equal(seen_sources[1], source[4:10])
+    serialized = json.loads(result_store.read(outcome.result_reference))
+    positions = {
+        cue["cue_id"]: cue["outcome"]["occurrences"][0]["temporal_position"]
+        for cue in serialized["cues"]
+    }
+    assert positions["cue-full"] == 2 / 48_000
+    assert positions["cue-windowed"] == 6 / 48_000
 
 
 def test_controlled_matching_failure_is_persisted_as_structured_error(

@@ -475,7 +475,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       { path: fixtures.secondMatchingCue, name: "Second cue" },
     ]);
 
-    // S0003 fields are actually sent in the Analysis creation request.
+    // Compatibility-preserved fields carry a per-Cue source window.
     expect(requestCues[0].label).toBe("First cue");
     expect(requestCues[0].trim_start_seconds).toBe(1);
     expect(requestCues[0].trim_end_seconds ?? null).toBeNull();
@@ -602,6 +602,11 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(createButton).toBeDisabled();
     await expect(page.getByText("Enter a start time as MM:SS or HH:MM:SS.")).toBeVisible();
 
+    for (const invalidTime of ["1::02", "-1:02", "+1:02", "1e2:03", "NaN:03", "00:60", "01:60:00"]) {
+      await page.locator(".cue-row").first().getByPlaceholder("e.g. 00:00:01").fill(invalidTime);
+      await expect(createButton).toBeDisabled();
+    }
+
     const analysesRequests: string[] = [];
     page.on("request", (request) => {
       if (
@@ -634,6 +639,31 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(page.locator(".cue-row")).toHaveCount(20);
     await expect(addButton).toBeDisabled();
     await expect(page.getByText("Maximum of 20 cues reached.")).toBeVisible();
+  });
+
+  test("serializes blank, end-only, start-only, and both-bound source windows", async ({ page }) => {
+    test.setTimeout(analysisTimeoutMs + 30_000);
+    const baseUrl = webuiBaseUrl();
+    const fixtures = fixturePaths();
+    const { requestCues } = await submitAnalysis(page, baseUrl, fixtures.sourceMedia, [
+      { path: fixtures.matchingCue },
+      { path: fixtures.matchingCue, endText: "00:00:00.0004" },
+      { path: fixtures.matchingCue, startText: "00:00:00.0001" },
+      {
+        path: fixtures.matchingCue,
+        startText: "00:00:00.0001",
+        endText: "00:00:00.0004",
+      },
+    ]);
+
+    expect(requestCues[0].trim_start_seconds ?? null).toBeNull();
+    expect(requestCues[0].trim_end_seconds ?? null).toBeNull();
+    expect(requestCues[1].trim_start_seconds ?? null).toBeNull();
+    expect(requestCues[1].trim_end_seconds).toBe(0.0004);
+    expect(requestCues[2].trim_start_seconds).toBe(0.0001);
+    expect(requestCues[2].trim_end_seconds ?? null).toBeNull();
+    expect(requestCues[3].trim_start_seconds).toBe(0.0001);
+    expect(requestCues[3].trim_end_seconds).toBe(0.0004);
   });
 
   test("proxies a source-media upload larger than the old Nginx body-size ceiling through to the API (S0001)", async ({
@@ -821,7 +851,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     ).toBe(1);
   });
 
-  test("rejects an out-of-range Cue-local trim bound with a safe advisory and no fabricated Result (S0005)", async ({
+  test("rejects an out-of-range source window with a safe advisory and no fabricated Result (S0008)", async ({
     page,
   }) => {
     test.setTimeout(analysisTimeoutMs + 30_000);
@@ -842,12 +872,8 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       { timeout: analysisTimeoutMs },
     );
 
-    // A valid WAV Cue with a deliberately out-of-range Cue-local End bound
-    // (S0005 section 4.11): the current Cue upload duration guardrail
-    // (`DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS`, 600s) is far lower than
-    // 99:59 (5,999s), so any successfully uploaded Cue is guaranteed to be
-    // shorter than this bound -- the server-side duration-relative
-    // rejection is deterministic, not a real-media coincidence. Start is
+    // 99:59 (5,999s) exceeds the controlled source fixture's duration, so
+    // the server-side source-window rejection is deterministic. Start is
     // left blank.
     const submission = await submitAnalysisExpectingRejection(
       page,
@@ -873,11 +899,12 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       `${submission.error.message} (error_code: ${submission.error.error_code}, correlation_id: ${submission.error.correlation_id})`,
     );
 
-    // The safe, conditional trim advisory is shown alongside it.
+    // The safe, conditional source-window advisory is shown alongside it.
     const advisory = page.getByRole("status");
     await expect(advisory).toBeVisible();
-    await expect(advisory).toContainText("inside the cue file");
-    await expect(advisory).toContainText("duration");
+    await expect(advisory).toContainText("search window inside the source media");
+    await expect(advisory).toContainText("source duration");
+    await expect(advisory).not.toContainText("inside the cue file");
     await expect(advisory).not.toContainText("invalid");
     await expect(advisory).not.toContainText(/\d+(\.\d+)?\s*s(econds)?\b/i);
 

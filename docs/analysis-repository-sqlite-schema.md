@@ -44,7 +44,7 @@ identifiers this repository stores as text
 | `analysis_id` | Non-empty, caller-supplied stable identifier for the Analysis. |
 | `state` | `AnalysisLifecycleState` (`core.analysis_lifecycle`, M4-01): `queued`, `running`, `succeeded`, or `failed`. |
 | `source_asset_id` | M4-02 canonical Asset identifier for the already-canonicalized source audio; validated, never a filesystem path. |
-| `cues` | Non-empty tuple of `CueAssetReference(cue_id, asset_id, label, trim_start_seconds, trim_end_seconds)`, each `asset_id` an M4-02 Asset identifier; `cue_id` values are unique within the record. `label`/`trim_start_seconds`/`trim_end_seconds` are S0003's additive, nullable presentation/processing metadata (see "Cue label and trim bounds (S0003)" below); they carry no media bytes, influence no matching/scoring/occurrence-selection decision, and default to `None` for a record built before S0003. |
+| `cues` | Non-empty tuple of `CueAssetReference(cue_id, asset_id, label, trim_start_seconds, trim_end_seconds)`, each `asset_id` an M4-02 Asset identifier; `cue_id` values are unique within the record. `label` is presentation metadata. The compatibility-preserved `trim_start_seconds`/`trim_end_seconds` keys are nullable per-Cue source-search bounds; they carry no media bytes, do not change matcher scoring/acceptance, and default to `None` for historical records. |
 | `effective_configuration` | An `EffectiveConfigurationSnapshot` (`core.analysis_result`, M3-02), reused unchanged. |
 | `lifecycle_timestamps` | A `LifecycleTimestamps` value: one optional, timezone-aware `datetime` per `AnalysisLifecycleState` member, present for every state actually reached so far. |
 | `result_reference` | Optional opaque string pointing at an externally serialized `AnalysisResult` (M3-06); this repository never stores or interprets the Result body itself. |
@@ -142,7 +142,7 @@ ownership. There is still no separate migration runner or schema-version
 column; a future incompatible change is expected to introduce explicit
 versioning rather than silently altering the contract.
 
-### Cue label and trim bounds (S0003)
+### Cue label and source-search bounds (S0008)
 
 `cues_json` gains three additive, nullable members per Cue entry --
 `label`, `trim_start_seconds`, `trim_end_seconds` -- with **no SQLite
@@ -160,8 +160,13 @@ non-negative trim bound; `trim_start_seconds < trim_end_seconds` when both
 are present) independently of `interfaces.rest_api.schemas`/Pydantic, so a
 non-HTTP Application caller cannot persist an inconsistent record through
 this adapter either. These three fields carry no media bytes, canonical
-sample arrays, filenames, or filesystem paths, and never influence
-matching, acceptance, score, occurrence selection, or source position.
+sample arrays, filenames, or filesystem paths. The two bounds constrain the
+source interval searched for that Cue; they do not trim the Cue asset or
+change matcher scoring and acceptance. Application rebases any found time by
+the sample-aligned window start, so Result timestamps remain absolute to
+source origin `0`. No SQLite column or table migration is needed,
+`cues_json` retains the same keys, and historical missing keys continue to
+deserialize as `None`.
 
 ## Transaction and concurrency behavior
 

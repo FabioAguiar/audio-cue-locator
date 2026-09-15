@@ -56,6 +56,13 @@ observa erro zero nos dois offsets conhecidos. Essa evidência não promete a
 mesma precisão para mídia real, para o instante da mídia anterior à
 canonicalização, nem para outro método.
 
+Uma janela de busca por Cue não altera essa origem. A Application converte o
+início solicitado para o índice da grade canônica, apresenta somente essa
+fatia do source ao matcher e soma `start_index / sample_rate` ao timestamp
+relativo antes de construir a `Occurrence`. Um `end` não nulo é deslocado pelo
+mesmo valor. Portanto, os tempos publicados continuam absolutos na timeline do
+source canonicalizado, inclusive quando a busca começou após zero.
+
 ### 1.2. `end`
 
 Quando presente, `end` representa o primeiro instante imediatamente após a

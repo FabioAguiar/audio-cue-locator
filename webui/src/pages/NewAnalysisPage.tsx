@@ -24,7 +24,7 @@ import ResultPage from "./ResultPage";
  * as props instead of polling independently, so the same mounted Analysis
  * is never polled by two components at once.
  *
- * Source-media type/size/duration validation, cue-duration-relative bounds
+ * Source-media type/size/duration and source-window bounds
  * checking, and acoustic matching all remain backend-authoritative. This
  * component only performs presentation-layer time-text parsing and local
  * format/cross-field validation before ever calling `createAnalysis`.
@@ -68,8 +68,8 @@ function newCueFileEntry(): CueFileEntry {
 // seconds is >= 0 and < 60; for HH:MM:SS the minute component is >= 0 and
 // < 60; fractional seconds are allowed only on the final component; no
 // sign, exponent notation, or free-form words are accepted. This is
-// presentation parsing only -- backend S0003 validation remains
-// authoritative for duration-relative bounds.
+// presentation parsing only -- backend validation remains authoritative
+// for source-duration-relative bounds.
 
 type TimeParseResult =
   | { kind: "empty" }
@@ -96,6 +96,9 @@ function parseCueTimeText(raw: string): TimeParseResult {
   }
 
   const numbers = parts.map((part) => Number(part));
+  if (!numbers.every(Number.isFinite)) {
+    return { kind: "invalid" };
+  }
   const hours = numbers.length === 3 ? numbers[0] : 0;
   const minutes = numbers.length === 3 ? numbers[1] : numbers[0];
   const seconds = numbers[numbers.length - 1];
@@ -107,7 +110,11 @@ function parseCueTimeText(raw: string): TimeParseResult {
     return { kind: "invalid" };
   }
 
-  return { kind: "value", seconds: hours * 3600 + minutes * 60 + seconds };
+  const total = hours * 3600 + minutes * 60 + seconds;
+  if (!Number.isFinite(total)) {
+    return { kind: "invalid" };
+  }
+  return { kind: "value", seconds: total };
 }
 
 function ApiErrorNotice({ error }: { error: ErrorPublic }): JSX.Element {
@@ -595,8 +602,8 @@ export default function NewAnalysisPage(): JSX.Element {
         {submitError && <ApiErrorNotice error={submitError} />}
         {submitError && trimAdvisoryVisible && (
           <p role="status" className="form-alert">
-            Start and End are positions inside the cue file. Check that the
-            values fall within that cue&apos;s duration.
+            Start and End define the search window inside the source media.
+            Check that the values form a valid interval within the source duration.
           </p>
         )}
         {submitNetworkErrorMessage && (

@@ -99,15 +99,17 @@ class InvalidAnalysisRecordError(ValueError):
 class CueAssetReference:
     """One Cue's identity paired with its M4-02 logical Asset reference
     (`docs/analysis-core-contracts.md`, section 2, `Cue.asset_reference`),
-    plus S0003's optional, presentation-only `label` and optional
-    Cue-local `trim_start_seconds`/`trim_end_seconds` processing bounds.
+    plus an optional, presentation-only `label` and optional per-Cue
+    source-search bounds in the compatibility-preserved fields
+    `trim_start_seconds`/`trim_end_seconds`.
 
     `asset_id` is validated as a canonical Asset identifier
     (`core.asset.validate_asset_identifier`); it is never a filesystem path,
     matching the M4-02 Asset Identity vs Storage Location boundary this
-    repository must preserve. `label`/`trim_start_seconds`/
-    `trim_end_seconds` never influence matching, acceptance, score,
-    occurrence selection, or source position (S0003 acceptance).
+    repository must preserve. The bounds constrain which interval of the
+    source media is searched for this Cue; they do not trim the Cue asset.
+    Matching score and acceptance remain unchanged, and occurrence times
+    retain the absolute source origin.
 
     `__post_init__` enforces every persisted-value invariant for the new
     fields independently of `interfaces.rest_api.schemas`/Pydantic and of
@@ -118,8 +120,8 @@ class CueAssetReference:
     `MAX_CUE_LABEL_CODEPOINTS`), and a non-null trim bound must be a
     finite, non-negative number, with `trim_start_seconds` strictly less
     than `trim_end_seconds` whenever both are present. It does not (and
-    cannot, without decoding media) check either bound against the Cue's
-    actual duration; that remains `application.create_analysis`'s job.
+    cannot, without decoding media) check either bound against the source
+    duration; that remains `application.create_analysis`'s job.
     """
 
     cue_id: str

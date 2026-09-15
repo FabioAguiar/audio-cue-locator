@@ -444,7 +444,7 @@ def test_http_202_returns_before_gate_controlled_processing_completes(
         _shutdown(executors)
 
 
-def test_controlled_matching_failure_is_persisted_and_exposed_safely_over_http(
+def test_controlled_per_cue_matching_failure_remains_a_safe_cue_failure_over_http(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     def _failed_match(source, cue, configuration):
@@ -479,12 +479,14 @@ def test_controlled_matching_failure_is_persisted_and_exposed_safely_over_http(
             location = created.headers["location"]
 
             terminal = await _poll_terminal(client, location)
-            assert terminal["status"] == "failed"
-            assert terminal["structured_error"]["category"] == "matching_failure"
-            assert terminal["result_reference"] is None
+            assert terminal["status"] == "succeeded"
+            assert terminal["structured_error"] is None
+            assert terminal["result_reference"] is not None
 
             result_response = await client.get(f"{location}/result")
-            _assert_error(result_response, 409, "analysis_failed")
+            assert result_response.status_code == 200
+            cue_outcome = result_response.json()["result"]["cues"][0]["outcome"]
+            assert cue_outcome["kind"] == "failure"
             assert "controlled internal failure detail" not in result_response.text
 
     try:
@@ -493,30 +495,33 @@ def test_controlled_matching_failure_is_persisted_and_exposed_safely_over_http(
         _shutdown(executors)
 
 
-# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+# --- Per-Cue source-search windows and absolute timestamps -------------------
 
 
-def test_cue_local_trim_selects_interior_target_and_preserves_source_absolute_timeline(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("start_sample", "end_sample"),
+    [
+        pytest.param(None, 20, id="end-only"),
+        pytest.param(8, None, id="start-only"),
+        pytest.param(8, 20, id="both"),
+    ],
+)
+def test_source_window_forms_preserve_absolute_result_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    start_sample: int | None,
+    end_sample: int | None,
 ):
-    """A real end-to-end HTTP flow: the source WAV contains a known target
-    at a known absolute sample offset; the Cue WAV carries leading and
-    trailing material (values the target does not share) around an
-    interior copy of that same target. The request's
-    `trim_start_seconds`/`trim_end_seconds` select exactly the interior
-    target segment. The Analysis must still succeed, the occurrence must
-    remain on the source-media absolute timeline (unaffected by the Cue's
-    own trim), and the create/status response must echo the requested
-    optional Cue fields back."""
+    """End-only, Start-only, and both-bound windows constrain the source,
+    retain the complete Cue, and publish the original source timestamp."""
 
     case = _manifest_case("found_offset_near_start")
-    target = case["cue"]  # [0.7, -0.5, 0.2, -0.8, 0.4, 0.1]
-    filler = [0.9, -0.9, 0.9, -0.9]
-    cue_samples = filler + target + filler
-    trim_start_seconds = len(filler) / 48_000
-    trim_end_seconds = (len(filler) + len(target)) / 48_000
+    trim_start_seconds = start_sample / 48_000 if start_sample is not None else None
+    trim_end_seconds = end_sample / 48_000 if end_sample is not None else None
 
-    app, executors = _build_test_app(monkeypatch, tmp_path, "cue-trim")
+    app, executors = _build_test_app(
+        monkeypatch, tmp_path, f"source-window-{start_sample}-{end_sample}"
+    )
 
     async def _scenario():
         async with _client(app) as client:
@@ -529,7 +534,7 @@ def test_cue_local_trim_selects_interior_target_and_preserves_source_absolute_ti
             cue = await _upload(
                 client,
                 "/api/v1/assets/cue",
-                _wav_bytes(cue_samples),
+                _wav_bytes(case["cue"]),
                 filename="cue.wav",
             )
 
@@ -551,33 +556,23 @@ def test_cue_local_trim_selects_interior_target_and_preserves_source_absolute_ti
             assert created.status_code == 202, created.text
             created_payload = created.json()
             assert created_payload["cues"][0]["label"] == "Target hit"
-            assert created_payload["cues"][0]["trim_start_seconds"] == pytest.approx(
-                trim_start_seconds
-            )
-            assert created_payload["cues"][0]["trim_end_seconds"] == pytest.approx(
-                trim_end_seconds
-            )
+            assert created_payload["cues"][0]["trim_start_seconds"] == trim_start_seconds
+            assert created_payload["cues"][0]["trim_end_seconds"] == trim_end_seconds
             location = created.headers["location"]
 
             terminal = await _poll_terminal(client, location)
             assert terminal["status"] == "succeeded"
             assert terminal["cues"][0]["label"] == "Target hit"
-            assert terminal["cues"][0]["trim_start_seconds"] == pytest.approx(
-                trim_start_seconds
-            )
-            assert terminal["cues"][0]["trim_end_seconds"] == pytest.approx(
-                trim_end_seconds
-            )
+            assert terminal["cues"][0]["trim_start_seconds"] == trim_start_seconds
+            assert terminal["cues"][0]["trim_end_seconds"] == trim_end_seconds
 
             result_response = await client.get(f"{location}/result")
             assert result_response.status_code == 200, result_response.text
             outcome = result_response.json()["result"]["cues"][0]["outcome"]
             assert outcome["kind"] == "occurrences"
             occurrence = outcome["occurrences"][0]
-            # cue_start_sample=12 at the fixture's 48 kHz canonical rate:
-            # the occurrence stays on the source-media absolute timeline,
-            # measured from source origin 0, exactly as before S0003 --
-            # never shifted or reinterpreted by the Cue's own trim bounds.
+            # The matcher sees a source slice for non-zero starts, but the
+            # published occurrence stays at source-absolute sample 12.
             assert occurrence["temporal_position"] == pytest.approx(
                 case["cue_start_sample"] / 48_000, abs=1e-4
             )
@@ -588,7 +583,7 @@ def test_cue_local_trim_selects_interior_target_and_preserves_source_absolute_ti
         _shutdown(executors)
 
 
-def test_duration_aware_invalid_trim_interval_returns_sanitized_error_and_persists_nothing(
+def test_duration_aware_invalid_source_window_returns_sanitized_error_and_persists_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     case = _manifest_case("found_offset_near_start")
@@ -609,12 +604,11 @@ def test_duration_aware_invalid_trim_interval_returns_sanitized_error_and_persis
                 filename="cue.wav",
             )
 
-            # The cue is `len(case["cue"]) / 48000` seconds long;
-            # requesting a start at-or-after that duration is a
+            # Requesting a start at the canonical source duration is a
             # duration-aware semantic violation only Application can
-            # detect (it requires decoding the Cue), not a request-shape
+            # detect (it requires canonicalizing the source), not a request-shape
             # one Pydantic could catch.
-            cue_duration_seconds = len(case["cue"]) / 48_000
+            source_duration_seconds = len(case["source"]) / 48_000
             rejected = await client.post(
                 "/api/v1/analyses",
                 json={
@@ -623,7 +617,7 @@ def test_duration_aware_invalid_trim_interval_returns_sanitized_error_and_persis
                         {
                             "cue_id": "cue-1",
                             "asset_id": cue["identifier"],
-                            "trim_start_seconds": cue_duration_seconds,
+                            "trim_start_seconds": source_duration_seconds,
                         }
                     ],
                 },

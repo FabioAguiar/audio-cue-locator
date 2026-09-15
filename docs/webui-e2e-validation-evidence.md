@@ -82,7 +82,16 @@ polling, and result flow. It asserts both the visible, distinct “No match foun
 for this cue.” presentation and the API Result outcome `kind: "no_match"` while
 the Analysis itself remains successful.
 
-### WebM source with blank Cue trims (S0005)
+### Per-Cue source-window serialization (S0008)
+
+One real-backend submission carries four Cues and captures the actual
+`POST /api/v1/analyses` body. It asserts the complete compatibility matrix:
+blank/blank serializes `null`/`null`, End only serializes `null`/value, Start
+only serializes value/`null`, and both fields serialize their numeric seconds.
+Small, source-valid bounds are used so this scenario reaches `202`; it uses no
+route interception or browser-side media decoding.
+
+### WebM source with a blank source search window (S0008)
 
 The browser selects a real WebM source (`E2E_WEBM_SOURCE_MEDIA_PATH`) and one
 matching WAV cue, leaving Name/Start/End blank, and submits the form. The test
@@ -93,7 +102,7 @@ UI state:
   is detected/accepted, not rejected as unsupported media);
 - the captured `POST /api/v1/analyses` request body serializes the blank
   Start/End as `trim_start_seconds: null` and `trim_end_seconds: null` --
-  full-Cue semantics, never `0`/`0`;
+  full-source-search semantics, never `0`/`0`;
 - the real `/api/v1/analyses` response status is checked and is explicitly
   `202` before its body is ever treated as an Analysis (a `400
   validation_error` would fail the test at that boundary instead of
@@ -106,12 +115,11 @@ this spec exists for
 (`specs/S0005-cue-trim-validation-clarity-and-analysis-creation-regression/
 spec.md`).
 
-### Duration-relative invalid Cue trim (S0005)
+### Duration-relative invalid source search window (S0008)
 
 The browser submits a real, valid WAV cue with a deliberately out-of-range
-Cue-local End bound (`99:59`, far beyond the cue-upload duration guardrail,
-so any successfully uploaded cue is guaranteed to be shorter than it) and a
-blank Start, against a real supported source. It asserts, without mocking or
+source End bound (`99:59`) and a blank Start against a supported source known
+to be shorter than that bound. It asserts, without mocking or
 intercepting the Analysis endpoint:
 
 - both the source-media and cue uploads succeed;
@@ -120,7 +128,7 @@ intercepting the Analysis endpoint:
 - the existing public Error notice (`message`/`error_code`/`correlation_id`)
   remains visible unchanged;
 - the additional, explicitly conditional trim advisory is visible and does
-  not assert a diagnosis (no claimed cue duration, no "the trim is
+  not assert a diagnosis (no claimed source duration, no "the window is
   invalid");
 - no Analysis ID is adopted and no Results heading/success state appears.
 
@@ -172,13 +180,14 @@ be changed to “passed” without an authorized real-backend execution.
 | Completed Analysis through WebUI | Server-issued ID and visible `succeeded` state | Not executed in this phase |
 | Multi-cue case | Two uploaded cues and two occurrence outcomes | Not executed in this phase |
 | No-match case | Successful Analysis with distinct `no_match` outcome | Not executed in this phase |
+| Per-Cue source windows (S0008) | Blank, End-only, Start-only, and both-bound values serialize correctly and a source-valid request reaches `202` | Not executed in this phase |
 | Error case | Real rejected upload and sanitized Error envelope/UI alert | Not executed in this phase |
 | JSON download | Download bytes equal real Result response bytes | Not executed in this phase |
 | Public API only | Same-origin `fetch`/XHR allowlist under `/api/v1` | Not executed in this phase |
 | Timeline, if introduced | Not applicable; M6-04 recorded justified postponement | Not applicable |
-| WebM + blank Cue trims (S0005) | `video/webm` detected, `trim_start_seconds`/`trim_end_seconds` serialize as `null`, `/analyses` explicitly `202` before parsing, terminal Results reached | Not executed in this phase |
-| Duration-relative invalid trim (S0005) | Real `400 validation_error`, existing Error notice preserved, safe conditional trim advisory shown, no fabricated Result | Not executed in this phase |
-| Blank-trim `validation_error` shows no trim advisory (S0005) | Real unrelated `400 validation_error` with blank Start/End does not trigger the trim-specific advisory | Not executed in this phase |
+| WebM + blank source window (S0008) | `video/webm` detected, `trim_start_seconds`/`trim_end_seconds` serialize as `null`, `/analyses` explicitly `202` before parsing, terminal Results reached | Not executed in this phase |
+| Duration-relative invalid source window (S0008) | Real `400 validation_error`, existing Error notice preserved, safe conditional source-window advisory shown, no fabricated Result | Not executed in this phase |
+| Blank-window `validation_error` shows no window advisory (S0008) | Real unrelated `400 validation_error` with blank Start/End does not trigger the source-window advisory | Not executed in this phase |
 | Uploading activity (S0006) | CTA/activity observed at the real source Asset-upload boundary | Not executed in this phase |
 | Pre-ID Locating activity (S0006) | CTA/Cues activity observed when the real `POST /api/v1/analyses` begins | Not executed in this phase |
 | Post-ID Locating activity (S0006) | Results loading activity observed after the real `202` supplies `analysis_id` | Not executed in this phase |

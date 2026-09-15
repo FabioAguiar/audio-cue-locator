@@ -23,6 +23,9 @@ from audio_cue_locator.application.multi_cue_orchestration import (
     CueNoMatch,
     CueOccurrences,
     FailureCategory,
+    Occurrence,
+    SourceSearchWindow,
+    _rebase_occurrence_times,
     run_multi_cue_analysis,
 )
 from audio_cue_locator.infrastructure.acoustic_matching import (
@@ -52,13 +55,9 @@ _FOUND_CUE = _canonical([0.9, -0.6, 0.3, -0.9, 0.6])
 """Identical to the burst embedded in `_shared_source`: a perfect (score
 1.0) match at every window aligned with the burst."""
 
-_NO_MATCH_CUE = _canonical([-0.9, 0.6, -0.3, 0.9, -0.6])
-"""The exact phase-inversion of `_FOUND_CUE`: at the burst's own position
-this scores a perfect negative correlation (-1.0, far below any acceptance
-threshold in [-1.0, 1.0]); everywhere else in `_shared_source` the window is
-silent, which baseline.py deterministically scores 0.0. The maximum score
-across the whole source is therefore 0.0, below DEFAULT_CONFIGURATION's
-0.75 threshold: a deterministic NO_MATCH, not a near-miss."""
+_NO_MATCH_CUE = _canonical([-0.9, -0.9, -0.9, -0.9, -0.9])
+"""A deterministic low-correlation Cue whose best score against
+`_shared_source` remains below DEFAULT_CONFIGURATION's threshold."""
 
 _INVALID_CUE = _canonical([])
 """An empty cue: a precondition violation (docs/matching-contract.md,
@@ -131,6 +130,96 @@ def test_match_cue_is_invoked_exactly_once_per_cue(monkeypatch):
     assert any(np.array_equal(arr, _FOUND_CUE) for arr in called_cue_arrays)
     assert any(np.array_equal(arr, _NO_MATCH_CUE) for arr in called_cue_arrays)
     assert all(call[2] == custom_configuration for call in calls)
+
+
+def test_independent_source_windows_slice_only_source_and_rebase_found_time(
+    monkeypatch,
+):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    sample_rate = 48_000
+    source = np.arange(20, dtype=np.float32)
+    cue_a = _canonical([0.1, 0.2])
+    cue_b = _canonical([0.3, 0.4, 0.5])
+    calls: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def _found(source_window, full_cue, configuration):
+        calls.append((source_window, full_cue))
+        return MatchResult(
+            outcome=MatchOutcome.FOUND,
+            configuration=configuration,
+            timestamp_seconds=2 / sample_rate,
+            score=0.91,
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue", _found)
+    results = orchestration.run_multi_cue_analysis(
+        source,
+        cues={"cue-a": cue_a, "cue-b": cue_b},
+        configuration=DEFAULT_CONFIGURATION,
+        source_windows={
+            "cue-a": SourceSearchWindow(
+                start_seconds=4 / sample_rate, end_seconds=10 / sample_rate
+            )
+        },
+    )
+
+    assert len(calls) == 2
+    assert np.array_equal(calls[0][0], source[4:10])
+    assert calls[0][1] is cue_a
+    assert calls[1][0] is source
+    assert calls[1][1] is cue_b
+    assert isinstance(results["cue-a"], CueOccurrences)
+    occurrence = results["cue-a"].occurrences[0]
+    assert occurrence.temporal_position == pytest.approx(6 / sample_rate)
+    assert occurrence.score == 0.91
+    assert occurrence.matching_method == DEFAULT_CONFIGURATION.method
+
+
+def test_timestamp_rebasing_uses_rounded_sample_grid_offset(monkeypatch):
+    import audio_cue_locator.application.multi_cue_orchestration as orchestration
+
+    requested_start = 1.6 / 48_000
+
+    def _found(source_window, full_cue, configuration):
+        return MatchResult(
+            outcome=MatchOutcome.FOUND,
+            configuration=configuration,
+            timestamp_seconds=0.0,
+            score=1.0,
+        )
+
+    monkeypatch.setattr(orchestration, "match_cue", _found)
+    result = orchestration.run_multi_cue_analysis(
+        np.arange(8, dtype=np.float32),
+        cues={"cue": _FOUND_CUE},
+        configuration=DEFAULT_CONFIGURATION,
+        source_windows={"cue": SourceSearchWindow(start_seconds=requested_start)},
+    )["cue"]
+
+    assert isinstance(result, CueOccurrences)
+    assert result.occurrences[0].temporal_position == pytest.approx(2 / 48_000)
+    assert result.occurrences[0].temporal_position != requested_start
+
+
+def test_rebasing_offsets_a_future_non_null_occurrence_end_by_the_same_amount():
+    outcome = CueOccurrences(
+        occurrences=(
+            Occurrence(
+                cue_id="cue",
+                temporal_position=0.25,
+                end=0.75,
+                score=0.8,
+                matching_method="future_method",
+            ),
+        )
+    )
+
+    rebased = _rebase_occurrence_times(outcome, 2.0)
+
+    assert isinstance(rebased, CueOccurrences)
+    assert rebased.occurrences[0].temporal_position == 2.25
+    assert rebased.occurrences[0].end == 2.75
 
 
 def test_configuration_used_is_the_one_supplied_not_a_module_level_default():

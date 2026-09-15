@@ -165,12 +165,13 @@ class AnalysisCueReference(_ForbidExtraModel):
     S0003 adds `label` (optional, presentation-only; normalization --
     surrounding-whitespace trim, blank-after-trim to `None`, the 80-code-
     point maximum -- is Application-owned, not enforced here) and
-    `trim_start_seconds`/`trim_end_seconds` (optional Cue-local processing
-    bounds). Pydantic rejects only the obvious request-shape violations a
-    non-numeric or negative trim value would be; cross-field ordering
+    `trim_start_seconds`/`trim_end_seconds` (optional per-Cue source-media
+    search bounds, with names retained for M7 compatibility). Pydantic
+    rejects only the obvious request-shape violations a non-numeric or
+    negative trim value would be; cross-field ordering
     (`start < end`) and every duration-aware bound remain
     `application.create_analysis`'s responsibility, since only Application
-    ever decodes the referenced Cue media. Existing clients supplying only
+    knows the canonical source duration. Existing clients supplying only
     `cue_id`/`asset_id` are unaffected: every new field defaults to
     `None`."""
 

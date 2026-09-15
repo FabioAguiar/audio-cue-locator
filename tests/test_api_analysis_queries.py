@@ -276,12 +276,10 @@ def test_pending_and_failed_application_errors_use_distinct_safe_409_codes():
 
 
 def test_router_registers_both_query_paths():
-    route_keys = {
-        (route.path, tuple(sorted(route.methods or ()))) for route in create_app().routes
-    }
+    paths = create_app().openapi()["paths"]
 
-    assert ("/api/v1/analyses/{analysis_id}", ("GET",)) in route_keys
-    assert ("/api/v1/analyses/{analysis_id}/result", ("GET",)) in route_keys
+    assert "get" in paths["/api/v1/analyses/{analysis_id}"]
+    assert "get" in paths["/api/v1/analyses/{analysis_id}/result"]
 
 
 def test_openapi_declares_result_success_and_shared_error_responses():
@@ -333,11 +331,11 @@ def test_route_module_has_no_direct_infrastructure_or_storage_imports():
     assert "pathlib" not in imported_modules
 
 
-# --- S0003: Cue labels and optional cue-local trim bounds --------------------
+# --- Cue labels and optional per-Cue source-search windows -------------------
 
 
 @pytest.mark.parametrize("state", list(AnalysisLifecycleState))
-def test_public_status_preserves_cue_label_and_trim_fields_across_every_state(state):
+def test_public_status_preserves_cue_label_and_source_window_fields_across_every_state(state):
     cue = CueAssetReference(
         cue_id="cue-1",
         asset_id=CUE_ASSET_ID,

@@ -8,8 +8,8 @@ anything that claims a `QUEUED` Analysis, drives it to completion, or bounds
 how many analyses run at once. This module closes that gap: it defines
 `LocalAnalysisExecutor`, which claims one persisted `QUEUED` Analysis by
 transitioning it to `RUNNING` exclusively through the M4-03
-`AnalysisRepositoryPort`, invokes the existing M3-03 orchestration unmodified
-exactly once, and persists exactly one of `SUCCEEDED`-with-result or
+`AnalysisRepositoryPort`, invokes the Application orchestration exactly once,
+and persists exactly one of `SUCCEEDED`-with-result or
 `FAILED`-with-structured-error back through that same port, all bounded by
 an injected `concurrent.futures.Executor` (`docs/architecture.md`, "Local
 Analysis Executor": "concorrência limitada").
@@ -38,11 +38,13 @@ spirit `multi_cue_orchestration.py` (M3-03) resolved its own G1/G2/G7:
   issue's acceptance criteria never name asset resolution or canonicalization
   as this issue's own deliverable. `LocalAnalysisExecutor.submit` therefore
   takes already-canonicalized `source`/`cues` arrays directly, mirroring
-  `run_multi_cue_analysis`'s own parameterization exactly, and does not read
+  `run_multi_cue_analysis`'s source/full-cue parameterization, and does not read
   or depend on `core.asset`, `infrastructure.asset_storage`, or
-  `infrastructure.media_processing`. Wiring asset-identifier resolution and
-  canonicalization ahead of a claimed Analysis remains an open integration
-  step for a future issue to authorize explicitly.
+  `infrastructure.media_processing`. It derives the optional per-Cue source
+  windows from the claimed record's durable `trim_*` metadata. Wiring
+  asset-identifier resolution and canonicalization ahead of a claimed
+  Analysis remains an open integration step for a future issue to authorize
+  explicitly.
 - G-02 (concurrency-limit mechanism): bounded by a `concurrent.futures.
   Executor` supplied by the caller (`worker_pool`), or a `ThreadPoolExecutor`
   built from `max_concurrency` by default. No configuration file or
@@ -124,6 +126,7 @@ from audio_cue_locator.application.multi_cue_orchestration import (
 )
 from audio_cue_locator.application.multi_cue_orchestration import (
     PerCueOutcome,
+    SourceSearchWindow,
     run_multi_cue_analysis,
 )
 from audio_cue_locator.application.ports.analysis_repository import (
@@ -462,8 +465,18 @@ class LocalAnalysisExecutor:
             raise AnalysisAlreadyClaimedError(analysis_id, exc) from exc
 
         try:
+            source_windows = {
+                cue.cue_id: SourceSearchWindow(
+                    start_seconds=cue.trim_start_seconds,
+                    end_seconds=cue.trim_end_seconds,
+                )
+                for cue in record.cues
+            }
             per_cue_outcomes = run_multi_cue_analysis(
-                source, cues, _to_infrastructure_configuration(record)
+                source,
+                cues,
+                _to_infrastructure_configuration(record),
+                source_windows=source_windows,
             )
         except Exception as exc:
             # A shared-source precondition failure (or any other exception

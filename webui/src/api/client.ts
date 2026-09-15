@@ -39,8 +39,9 @@ export interface AssetPublic {
 export type AnalysisStatus = "queued" | "running" | "succeeded" | "failed";
 
 /** S0003 adds `label` (optional, presentation-only) and
- * `trim_start_seconds`/`trim_end_seconds` (optional Cue-local processing
- * bounds, half-open `[start, end)`, in seconds). S0004 (`specs/S0004-
+ * `trim_start_seconds`/`trim_end_seconds` (optional per-Cue source-media
+ * search bounds, half-open `[start, end)`, in seconds; names retained for
+ * compatibility). S0004 (`specs/S0004-
  * responsive-single-screen-home-design-convergence/spec.md`) binds these
  * fields in `NewAnalysisPage.tsx`'s per-cue Name/Start time/End time
  * inputs; every field here remains optional since a cue may still omit

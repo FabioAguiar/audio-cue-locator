@@ -358,6 +358,66 @@ def test_video_source_with_audio_completes_the_real_http_analysis_flow(
         _shutdown(executors)
 
 
+# --- S0008: real source window keeps the absolute source timestamp -------
+
+
+def test_nonzero_source_window_returns_absolute_timestamp_through_real_http_flow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    case = _manifest_case("found_offset_near_start")
+    _root, app, executors = _build_test_app(monkeypatch, tmp_path, "source-window")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(case["source"]),
+                filename="source.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(case["cue"]),
+                filename="cue.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            created = await client.post(
+                "/api/v1/analyses",
+                json={
+                    "source_asset_id": source["identifier"],
+                    "cues": [
+                        {
+                            "cue_id": "cue-windowed",
+                            "asset_id": cue["identifier"],
+                            "trim_start_seconds": 8 / 48_000,
+                            "trim_end_seconds": 20 / 48_000,
+                        }
+                    ],
+                },
+            )
+            assert created.status_code == 202, created.text
+            location = created.headers["location"]
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+            result_response = await client.get(f"{location}/result")
+            assert result_response.status_code == 200, result_response.text
+            occurrence = result_response.json()["result"]["cues"][0]["outcome"][
+                "occurrences"
+            ][0]
+            assert occurrence["temporal_position"] == pytest.approx(
+                case["cue_start_sample"] / 48_000, abs=1 / 48_000
+            )
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
 # --- S0002: WebM source through the real REST path (real FFmpeg) ----------
 
 

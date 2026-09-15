@@ -19,10 +19,10 @@ left for this module to decide (G1, G2, G7):
   `docs/analysis-effective-configuration.md` (M3-02) fix those contracts
   only at the conceptual/documentary level, and `src/audio_cue_locator/core/`
   defines no corresponding dataclasses. `run_multi_cue_analysis` therefore
-  takes the three concrete inputs an Analysis conceptually carries --
-  the canonicalized source audio, its cues, and its effective matching
-  configuration -- as plain parameters, rather than requiring a caller to
-  first construct an object this codebase does not yet define.
+  takes the canonicalized source audio, full cues, effective matching
+  configuration, and optional per-Cue source windows as plain parameters,
+  rather than requiring a caller to first construct an object this codebase
+  does not yet define.
 - G2 (per-cue outcome representation): M3-05 now fixes the normative Core
   distinction in `docs/analysis-core-contracts.md`. Each Infrastructure
   `MatchResult` is projected into exactly one immutable variant:
@@ -45,12 +45,10 @@ audio` mapping, and the result is a `cue_id -> PerCueOutcome` mapping built by
 iterating that same mapping's items -- there is no separate index-based or
 order-dependent step where a mismatch could be introduced.
 
-This module holds `numpy.ndarray` values purely as opaque, already-
-canonicalized audio buffers (`src/audio_cue_locator/infrastructure/
-media_processing/canonical_audio.py`, M1-03) to pass through to `match_cue`;
-it performs no numeric computation of its own -- no correlation, no scoring,
-no threshold comparison -- and does not import `scipy` or reimplement any
-part of `baseline.py`. Out of scope, per the formal issue and the
+This module holds already-canonicalized `numpy.ndarray` audio buffers. It
+performs only Application-owned source slicing and timestamp rebasing; it
+does no correlation, scoring, threshold comparison, renormalization, or
+reimplementation of `baseline.py`. Out of scope, per the formal issue and the
 operational state alike: any new matching algorithm or change to the M2
 baseline; parallel or asynchronous execution of cues; multiple-occurrence
 selection/deduplication policy (M3-04); a REST API, a WebUI, or persistence
@@ -62,6 +60,7 @@ docs/multi-cue-orchestration.md documents this module for human review.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -74,6 +73,9 @@ from audio_cue_locator.infrastructure.acoustic_matching import (
     MatchOutcome,
     MatchResult,
     match_cue,
+)
+from audio_cue_locator.infrastructure.media_processing.canonical_audio import (
+    CANONICAL_AUDIO_SPEC,
 )
 
 
@@ -103,6 +105,43 @@ class Occurrence:
     score: float
     matching_method: str
     end: float | None = None
+
+
+@dataclass(frozen=True)
+class SourceSearchWindow:
+    """Optional half-open source-media interval for one Cue.
+
+    The historical request/persistence names remain `trim_*`, but this
+    Application-owned value makes their corrected source-search semantics
+    explicit at the matching boundary.
+    """
+
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("start_seconds", "end_seconds"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"SourceSearchWindow.{field_name} must be a finite "
+                    "non-negative number or None"
+                )
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.start_seconds >= self.end_seconds
+        ):
+            raise ValueError(
+                "SourceSearchWindow.start_seconds must be before end_seconds"
+            )
 
 
 @dataclass(frozen=True)
@@ -208,16 +247,79 @@ def _to_per_cue_outcome(cue_id: str, result: MatchResult) -> PerCueOutcome:
     )
 
 
+def _rebase_occurrence_times(
+    outcome: PerCueOutcome, offset_seconds: float
+) -> PerCueOutcome:
+    """Return `outcome` on the original source timeline."""
+
+    if not isinstance(outcome, CueOccurrences) or offset_seconds == 0.0:
+        return outcome
+    return CueOccurrences(
+        occurrences=tuple(
+            Occurrence(
+                cue_id=occurrence.cue_id,
+                temporal_position=occurrence.temporal_position + offset_seconds,
+                score=occurrence.score,
+                matching_method=occurrence.matching_method,
+                end=(
+                    occurrence.end + offset_seconds
+                    if occurrence.end is not None
+                    else None
+                ),
+            )
+            for occurrence in outcome.occurrences
+        )
+    )
+
+
+def _source_slice(
+    source: np.ndarray, window: SourceSearchWindow | None
+) -> tuple[np.ndarray, float]:
+    """Resolve a source window to a slice and sample-aligned time offset."""
+
+    if window is None or (
+        window.start_seconds is None and window.end_seconds is None
+    ):
+        return source, 0.0
+    sample_rate = CANONICAL_AUDIO_SPEC.sample_rate_hz
+    source_duration_seconds = source.shape[0] / sample_rate
+    start_seconds = (
+        window.start_seconds if window.start_seconds is not None else 0.0
+    )
+    if start_seconds >= source_duration_seconds:
+        raise ValueError("source search window start must be before source end")
+    if (
+        window.end_seconds is not None
+        and window.end_seconds > source_duration_seconds
+    ):
+        raise ValueError("source search window end must not exceed source duration")
+    start_index = (
+        round(window.start_seconds * sample_rate)
+        if window.start_seconds is not None
+        else 0
+    )
+    end_index = (
+        round(window.end_seconds * sample_rate)
+        if window.end_seconds is not None
+        else source.shape[0]
+    )
+    if end_index <= start_index:
+        raise ValueError("source search window must contain a canonical sample")
+    return source[start_index:end_index], start_index / sample_rate
+
+
 def run_multi_cue_analysis(
     source: np.ndarray,
     cues: Mapping[str, np.ndarray],
     configuration: EffectiveConfiguration,
+    source_windows: Mapping[str, SourceSearchWindow] | None = None,
 ) -> dict[str, PerCueOutcome]:
     """Locate every cue of an Analysis within its shared source audio.
 
     Calls `match_cue` (`baseline.py`, M2-02) exactly once per entry of
-    `cues`, against the same `source`, using `configuration` unchanged for
-    every call -- never a module-level default such as
+    `cues`, against that Cue's requested slice of the same `source`, using
+    the complete Cue and `configuration` unchanged for every call -- never
+    a module-level default such as
     `baseline.DEFAULT_CONFIGURATION` or `acceptance.EVIDENCE_BASED_CONFIGURATION`
     read directly by this function. Callers must supply the
     `EffectiveConfiguration` already attached to the Analysis itself (its
@@ -258,10 +360,15 @@ def run_multi_cue_analysis(
 
     _validate_shared_source(source)
 
-    return {
-        cue_id: _to_per_cue_outcome(
-            cue_id,
-            match_cue(source, cue_asset, configuration),
+    outcomes: dict[str, PerCueOutcome] = {}
+    for cue_id, cue_asset in cues.items():
+        source_window, offset_seconds = _source_slice(
+            source,
+            source_windows.get(cue_id) if source_windows is not None else None,
         )
-        for cue_id, cue_asset in cues.items()
-    }
+        outcome = _to_per_cue_outcome(
+            cue_id,
+            match_cue(source_window, cue_asset, configuration),
+        )
+        outcomes[cue_id] = _rebase_occurrence_times(outcome, offset_seconds)
+    return outcomes
