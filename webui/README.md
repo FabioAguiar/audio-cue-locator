@@ -56,9 +56,26 @@ duration; it never claims certainty about the server's exact cause, and it
 is never shown when every Start/End field was blank.
 
 Temporal/timeline visualization remains out of scope (M6-04's postponement
-still applies; see `docs/vision.md`), and no media preview/play control is
-implemented (S0004, `specs/S0004-responsive-single-screen-home-design-
-convergence/spec.md`).
+still applies; see `docs/vision.md`). S0014 instead keeps completed Results
+compact and source-grounded: each Cue has one initially expanded group whose
+header shows the user Name when present (otherwise the current-session upload
+filename, then `cue_id`), supplied Start/End source-search bounds, that Cue's
+match count or failure status, and the effective matching method. The `−`/`+`
+control collapses or expands only that Cue's details.
+
+Matched details remain in canonical chronological order. **#** is the
+one-based canonical Index, while **Rank** is a separate one-based similarity
+ordinal derived from raw score descending, earlier position, then canonical
+index. Position uses `MM:SS` below one hour and `HH:MM:SS` from one hour,
+fractional seconds are floored for display only, and Similarity remains a
+two-decimal raw score rather than a percentage or confidence value.
+
+Compact Cue and occurrence play/stop controls use the S0013 Analysis-scoped
+WAV audition endpoints. Audio is fetched only after activation; one shared
+controller permits at most one playback at a time, and stopping, switching
+targets, collapsing the active group, natural completion, or leaving the
+Analysis releases the audio and Blob URL. The WebUI does not extract media,
+construct source segments, or perform matching locally.
 
 ### Settings: Minimum similarity score (S0010)
 
@@ -110,10 +127,14 @@ must go through the `/api/v1` namespace, for example:
 - `POST /api/v1/analyses`
 - `GET /api/v1/analyses/{analysis_id}`
 - `GET /api/v1/analyses/{analysis_id}/result`
+- `GET /api/v1/analyses/{analysis_id}/cues/{cue_id}/audio`
+- `GET /api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio`
 
-The API base URL is a single constant (`API_BASE_URL`) in
-`webui/src/api/client.ts`, the only module that constructs a `fetch`
-request or knows the request/response JSON shapes.
+`webui/src/api/client.ts` owns construction and Error-envelope handling for
+the upload, Analysis status, and S0013 binary audition operations, including
+both bounded audio paths. The deliberately separate
+`webui/src/api/downloadResult.ts` continues to own Result retrieval so its
+captured raw response bytes remain the exact download source.
 
 This WebUI must never:
 

@@ -1,11 +1,9 @@
 /**
- * Typed client for the four REST API v1 routes the WebUI is authorized to
- * call (docs/rest-api-v1-contract.md): the two bounded upload routes,
- * asynchronous Analysis creation, and Analysis status retrieval. This is
- * the only module that constructs a `fetch` request or knows the exact
- * request/response JSON shapes; `NewAnalysisPage.tsx` and
- * `useAnalysisPolling.ts` both depend on it instead of calling `fetch`
- * directly (M6-02, `intents/M6/M6-02/implementation-handoff.json`).
+ * Typed client for the six REST API v1 operations this module owns: the two
+ * bounded upload routes, asynchronous Analysis creation, Analysis status
+ * retrieval, and the two S0013 binary audition operations. ResultPage uses
+ * the typed audition functions here instead of constructing API URLs or
+ * parsing Error envelopes itself.
  *
  * This module never imports `src/audio_cue_locator/*`, never reads
  * SQLite or the backend filesystem, and never invents a request/response
@@ -121,6 +119,13 @@ export type ApiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: ErrorPublic };
 
+/** A successful S0013 audition body or the existing safe public Error
+ * envelope returned by the API. Transport/body-decoding failures reject
+ * with `ApiNetworkError`, matching the JSON-client distinction above. */
+export type AudioAuditionResult =
+  | { ok: true; blob: Blob }
+  | { ok: false; error: ErrorPublic };
+
 /** Raised only for a transport-level failure: the request never produced
  * a parseable response (a rejected `fetch`, a timeout, or a body that is
  * not valid JSON). Never raised for a well-formed non-2xx response — that
@@ -162,6 +167,29 @@ async function requestJson<T>(
   if (response.ok) {
     return { ok: true, data: body as T };
   }
+  return { ok: false, error: body as ErrorPublic };
+}
+
+async function requestAudio(
+  input: RequestInfo,
+  signal?: AbortSignal,
+): Promise<AudioAuditionResult> {
+  let response: Response;
+  try {
+    response = await fetch(input, { method: "GET", signal });
+  } catch (cause) {
+    throw new ApiNetworkError("Network request failed", cause);
+  }
+
+  if (response.ok) {
+    try {
+      return { ok: true, blob: await response.blob() };
+    } catch (cause) {
+      throw new ApiNetworkError("Response body could not be read", cause);
+    }
+  }
+
+  const body = await parseJsonOrThrowNetworkError(response);
   return { ok: false, error: body as ErrorPublic };
 }
 
@@ -219,5 +247,32 @@ export function getAnalysisStatus(
   return requestJson<AnalysisPublic>(
     `${API_BASE_URL}/analyses/${encodeURIComponent(analysisId)}`,
     { method: "GET" },
+  );
+}
+
+/** `GET /api/v1/analyses/{analysis_id}/cues/{cue_id}/audio` — lazily
+ * fetch the completed Analysis Cue's bounded WAV audition body. */
+export function fetchCueAuditionAudio(
+  analysisId: string,
+  cueId: string,
+  signal?: AbortSignal,
+): Promise<AudioAuditionResult> {
+  return requestAudio(
+    `${API_BASE_URL}/analyses/${encodeURIComponent(analysisId)}/cues/${encodeURIComponent(cueId)}/audio`,
+    signal,
+  );
+}
+
+/** `GET .../occurrences/{occurrence_index}/audio` — lazily fetch the WAV
+ * audition for one canonical, zero-based Result occurrence index. */
+export function fetchOccurrenceAuditionAudio(
+  analysisId: string,
+  cueId: string,
+  occurrenceIndex: number,
+  signal?: AbortSignal,
+): Promise<AudioAuditionResult> {
+  return requestAudio(
+    `${API_BASE_URL}/analyses/${encodeURIComponent(analysisId)}/cues/${encodeURIComponent(cueId)}/occurrences/${occurrenceIndex}/audio`,
+    signal,
   );
 }

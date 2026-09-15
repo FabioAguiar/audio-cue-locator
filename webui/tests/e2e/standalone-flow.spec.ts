@@ -95,6 +95,15 @@ const documentedOperations = [
     method: "GET",
     pathname: /^\/api\/v1\/analyses\/[^/]+\/result$/,
   },
+  {
+    method: "GET",
+    pathname: /^\/api\/v1\/analyses\/[^/]+\/cues\/[^/]+\/audio$/,
+  },
+  {
+    method: "GET",
+    pathname:
+      /^\/api\/v1\/analyses\/[^/]+\/cues\/[^/]+\/occurrences\/\d+\/audio$/,
+  },
 ] as const;
 
 function requiredEnvironmentValue(name: string): string {
@@ -455,6 +464,43 @@ async function resolvedResultBodies(
   return Promise.all(bodies);
 }
 
+function deriveSimilarityRanks(
+  occurrences: Array<{ temporal_position: number; score: number }>,
+): number[] {
+  const rankedIndices = occurrences
+    .map((_occurrence, index) => index)
+    .sort((leftIndex, rightIndex) => {
+      const left = occurrences[leftIndex];
+      const right = occurrences[rightIndex];
+      return (
+        right.score - left.score ||
+        left.temporal_position - right.temporal_position ||
+        leftIndex - rightIndex
+      );
+    });
+  const ranks = new Array<number>(occurrences.length);
+  rankedIndices.forEach((canonicalIndex, rankIndex) => {
+    ranks[canonicalIndex] = rankIndex + 1;
+  });
+  return ranks;
+}
+
+function formatExpectedClock(seconds: number): string {
+  const wholeSeconds = Math.floor(seconds);
+  const hours = Math.floor(wholeSeconds / 3600);
+  const minutes = Math.floor((wholeSeconds % 3600) / 60);
+  const secondsPart = wholeSeconds % 60;
+  if (wholeSeconds < 3600) {
+    return `${String(Math.floor(wholeSeconds / 60)).padStart(2, "0")}:${String(
+      secondsPart,
+    ).padStart(2, "0")}`;
+  }
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(
+    2,
+    "0",
+  )}:${String(secondsPart).padStart(2, "0")}`;
+}
+
 test.describe.serial("standalone WebUI against the real REST API", () => {
   test("renders the single-screen Home shell with Source before Cues and no Results initially", async ({
     page,
@@ -511,7 +557,12 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       timeout: analysisTimeoutMs,
     });
     await expect(page.getByRole("heading", { name: "Second cue" })).toBeVisible();
-    expect(await page.getByText(/^Position: /).count()).toBeGreaterThanOrEqual(2);
+    await expect(page.locator(".cue-result-group")).toHaveCount(2);
+    const firstGroup = page.locator(".cue-result-group").nth(0);
+    const secondGroup = page.locator(".cue-result-group").nth(1);
+    expect(
+      await page.locator(".occurrence-position").count(),
+    ).toBeGreaterThanOrEqual(2);
 
     const downloadButton = page.getByRole("button", { name: "Download result JSON" });
     await expect(downloadButton).toBeVisible({ timeout: analysisTimeoutMs });
@@ -539,6 +590,18 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
         (cue) => cue.outcome.kind === "occurrences",
       ),
     ).toBe(true);
+    await expect(firstGroup.locator(".cue-result-identity h3")).toHaveText(
+      "First cue",
+    );
+    await expect(
+      firstGroup.locator('.cue-result-window [title="Raw source-search start: 1 seconds"]'),
+    ).toHaveText("Start 00:01");
+    for (const group of [firstGroup, secondGroup]) {
+      await expect(group.locator(".cue-result-method strong")).toHaveText(
+        envelope.result.configuration.matching.method,
+      );
+      await expect(group.getByText(/^Method$/)).toHaveCount(1);
+    }
 
     const rawScores = envelope.result.cues.flatMap((cue) =>
       cue.outcome.kind === "occurrences"
@@ -546,13 +609,15 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
         : [],
     );
     const scoreBadges = page.locator(".occurrence-score-badge");
+    const positionCells = page.locator(".occurrence-position");
     expect(rawScores.length).toBeGreaterThan(0);
     await expect(scoreBadges).toHaveCount(rawScores.length);
+    await expect(positionCells).toHaveCount(rawScores.length);
     for (let index = 0; index < rawScores.length; index += 1) {
       const rawScore = rawScores[index];
       expect(Number.isFinite(rawScore)).toBe(true);
       await expect(scoreBadges.nth(index)).toHaveText(
-        /^Similarity score: -?\d+\.\d{2}$/,
+        /^-?\d+\.\d{2}$/,
       );
       await expect(scoreBadges.nth(index)).not.toContainText("%");
       await expect(scoreBadges.nth(index)).toHaveAttribute(
@@ -560,9 +625,26 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
         `Raw similarity score: ${rawScore}`,
       );
       await expect(scoreBadges.nth(index)).toHaveText(
-        `Similarity score: ${rawScore.toFixed(2)}`,
+        rawScore.toFixed(2),
       );
     }
+
+    await expect(firstGroup.locator(".cue-result-window")).toContainText(
+      "Start 00:01",
+    );
+    await expect(firstGroup.locator(".cue-result-window")).not.toContainText("End");
+    await expect(secondGroup.locator(".cue-result-window")).toHaveCount(0);
+    const firstDisclosure = firstGroup.getByRole("button", {
+      name: "Collapse results for First cue",
+    });
+    await expect(firstDisclosure).toHaveAttribute("aria-expanded", "true");
+    await firstDisclosure.click();
+    await expect(firstGroup.locator(".cue-result-group__details")).toBeHidden();
+    await expect(secondGroup.locator(".cue-result-group__details")).toBeVisible();
+    await firstGroup
+      .getByRole("button", { name: "Expand results for First cue" })
+      .click();
+    await expect(firstGroup.locator(".cue-result-group__details")).toBeVisible();
 
     const downloadPromise = page.waitForEvent("download");
     await downloadButton.click();
@@ -601,7 +683,15 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(page.getByText("No match found for this cue.")).toBeVisible({
       timeout: analysisTimeoutMs,
     });
-    await expect(page.locator(".result-row--no-match")).toBeVisible();
+    const noMatchGroup = page.locator(".cue-result-group--no_match");
+    await expect(noMatchGroup).toBeVisible();
+    await expect(noMatchGroup.locator(".cue-result-status")).toHaveText("0 matches");
+    await expect(
+      noMatchGroup.getByRole("button", { name: /^Play cue / }),
+    ).toBeVisible();
+    await expect(
+      noMatchGroup.getByRole("button", { name: /^Play match / }),
+    ).toHaveCount(0);
 
     const responseBodies = await resolvedResultBodies(resultBodies);
     const envelope = JSON.parse(
@@ -610,6 +700,9 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     expect(envelope.result.analysis_id).toBe(analysisId);
     expect(envelope.result.cues).toHaveLength(1);
     expect(envelope.result.cues[0].outcome.kind).toBe("no_match");
+    await expect(noMatchGroup.locator(".cue-result-method strong")).toHaveText(
+      envelope.result.configuration.matching.method,
+    );
 
     assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
   });
@@ -626,6 +719,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     }
 
     const baseUrl = webuiBaseUrl();
+    const calls = beginPublicApiAudit(page);
     const { analysisId } = await submitAnalysis(
       page,
       baseUrl,
@@ -653,15 +747,50 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
         (item) => item.matching_method === "normalized_cross_correlation_multi_v1",
       ),
     ).toBe(true);
-    await expect(page.locator(".occurrence-item")).toHaveCount(occurrences.length);
+    const group = page.locator(".cue-result-group");
+    await expect(group).toHaveCount(1);
+    await expect(
+      group.getByRole("heading", { name: "Repeated cue" }),
+    ).toBeVisible();
+    await expect(group.locator(".cue-result-status")).toHaveText(
+      `${occurrences.length} matches`,
+    );
+    await expect(group.locator(".cue-result-method strong")).toHaveText(
+      envelope.result.configuration.matching.method,
+    );
+    await expect(group.locator(".cue-result-method strong")).toHaveCount(1);
+
+    const disclosure = group.getByRole("button", {
+      name: "Collapse results for Repeated cue",
+    });
+    await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(disclosure).toHaveText("−");
+    await expect(group.locator(".cue-result-group__details")).toBeVisible();
+
+    const rows = group.locator(".occurrence-row");
+    await expect(rows).toHaveCount(occurrences.length);
     await expect(page.locator(".match-badge")).toContainText(
       `${occurrences.length} matches found`,
     );
+    const expectedRanks = deriveSimilarityRanks(occurrences);
     const scoreBadges = page.locator(".occurrence-score-badge");
     await expect(scoreBadges).toHaveCount(occurrences.length);
     for (let index = 0; index < occurrences.length; index += 1) {
+      const row = rows.nth(index);
+      await expect(row).toHaveAttribute("data-occurrence-index", String(index));
+      await expect(row).toHaveAttribute(
+        "data-similarity-rank",
+        String(expectedRanks[index]),
+      );
+      await expect(row.locator(".occurrence-position")).toHaveText(
+        formatExpectedClock(occurrences[index].temporal_position),
+      );
+      await expect(row.locator(".occurrence-position")).toHaveAttribute(
+        "title",
+        `Raw position: ${occurrences[index].temporal_position} seconds`,
+      );
       await expect(scoreBadges.nth(index)).toHaveText(
-        `Similarity score: ${occurrences[index].score.toFixed(2)}`,
+        occurrences[index].score.toFixed(2),
       );
       await expect(scoreBadges.nth(index)).toHaveAttribute(
         "title",
@@ -669,6 +798,75 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       );
       await expect(scoreBadges.nth(index)).not.toContainText("%");
     }
+
+    await disclosure.click();
+    await expect(group.locator(".cue-result-group__details")).toBeHidden();
+    const expand = group.getByRole("button", {
+      name: "Expand results for Repeated cue",
+    });
+    await expect(expand).toHaveAttribute("aria-expanded", "false");
+    await expect(expand).toHaveText("+");
+    await expand.click();
+    await expect(group.locator(".cue-result-group__details")).toBeVisible();
+
+    const cueAudioPath = `/api/v1/analyses/${encodeURIComponent(analysisId)}/cues/cue-1/audio`;
+    const cueAudioResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === cueAudioPath,
+    );
+    await group.getByRole("button", { name: "Play cue Repeated cue" }).click();
+    const cueResponse = await cueAudioResponse;
+    expect(cueResponse.status()).toBe(200);
+    expect(cueResponse.headers()["content-type"]).toContain("audio/wav");
+    await expect(group.getByRole("button", { name: "Stop cue Repeated cue" })).toBeVisible();
+    await group.getByRole("button", { name: "Stop cue Repeated cue" }).click();
+    await expect(group.getByRole("button", { name: "Play cue Repeated cue" })).toBeVisible();
+
+    const firstOccurrencePath = `${cueAudioPath.replace(/\/audio$/, "")}/occurrences/0/audio`;
+    const firstOccurrenceResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === firstOccurrencePath,
+    );
+    await rows.nth(0).getByRole("button", { name: "Play match 1 for Repeated cue" }).click();
+    expect((await firstOccurrenceResponse).status()).toBe(200);
+    await expect(rows.nth(0).getByRole("button", { name: "Stop match 1 for Repeated cue" })).toBeVisible();
+
+    const secondOccurrencePath = `${cueAudioPath.replace(/\/audio$/, "")}/occurrences/1/audio`;
+    const secondOccurrenceResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === secondOccurrencePath,
+    );
+    await rows.nth(1).getByRole("button", { name: "Play match 2 for Repeated cue" }).click();
+    expect((await secondOccurrenceResponse).status()).toBe(200);
+    await expect(rows.nth(0).getByRole("button", { name: "Play match 1 for Repeated cue" })).toBeVisible();
+    await expect(rows.nth(1).getByRole("button", { name: "Stop match 2 for Repeated cue" })).toBeVisible();
+    await rows.nth(1).getByRole("button", { name: "Stop match 2 for Repeated cue" }).click();
+
+    const rankDiffersIndex = expectedRanks.findIndex((rank, index) => rank !== index + 1);
+    expect(rankDiffersIndex).toBeGreaterThanOrEqual(0);
+    const canonicalPath = `${cueAudioPath.replace(/\/audio$/, "")}/occurrences/${rankDiffersIndex}/audio`;
+    const canonicalResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === canonicalPath,
+    );
+    await rows
+      .nth(rankDiffersIndex)
+      .getByRole("button", {
+        name: `Play match ${rankDiffersIndex + 1} for Repeated cue`,
+      })
+      .click();
+    expect((await canonicalResponse).status()).toBe(200);
+
+    await group.getByRole("button", { name: "Collapse results for Repeated cue" }).click();
+    await expect(group.locator(".cue-result-group__details")).toBeHidden();
+    await group.getByRole("button", { name: "Expand results for Repeated cue" }).click();
+    await expect(group.locator(".cue-result-group__details")).toBeVisible();
+    await expect(group.getByRole("button", { name: /^Stop match / })).toHaveCount(0);
+    await expect(
+      rows.nth(rankDiffersIndex).getByRole("button", {
+        name: `Play match ${rankDiffersIndex + 1} for Repeated cue`,
+      }),
+    ).toBeVisible();
+
+    assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
   });
 
   test("enforces local time validation and the 20-cue admission guard", async ({ page }) => {

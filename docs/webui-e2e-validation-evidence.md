@@ -33,6 +33,8 @@ API to have the same origin, requires every operation path to begin with
 | `POST` | `/api/v1/analyses` | Create the server-owned Analysis |
 | `GET` | `/api/v1/analyses/{analysis_id}` | Poll persisted lifecycle state |
 | `GET` | `/api/v1/analyses/{analysis_id}/result` | Retrieve a succeeded Result |
+| `GET` | `/api/v1/analyses/{analysis_id}/cues/{cue_id}/audio` | Audition the completed Analysis Cue |
+| `GET` | `/api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio` | Audition one canonical Result occurrence |
 
 No WebUI operation is allowed to access Core, SQLite, the backend filesystem,
 or an alternative matching path.
@@ -51,6 +53,8 @@ run, set:
 | `E2E_SECOND_MATCHING_CUE_PATH` | Second WAV cue known to occur in the source |
 | `E2E_NO_MATCH_CUE_PATH` | WAV cue curated not to match the source under the active configuration |
 | `E2E_WEBM_SOURCE_MEDIA_PATH` | A supported WebM source containing an audio stream (S0002/S0005 WebM regression) |
+| `E2E_REPEATED_SOURCE_MEDIA_PATH` | Optional deterministic source with at least two occurrences of the paired cue (required for S0009/S0014 repeated-result coverage) |
+| `E2E_REPEATED_CUE_PATH` | Optional WAV cue paired with the repeated source |
 | `E2E_ANALYSIS_TIMEOUT_MS` | Optional terminal-state timeout; defaults to `180000` |
 
 Fixture paths and media bytes are runtime inputs. They must not be copied into
@@ -188,6 +192,38 @@ contains no percentage or statistical-quality wording. No route is intercepted
 or fulfilled. These are implemented assertions, not an observed pass in this
 implementation phase.
 
+### Grouped Results, ranking, and playback (S0014)
+
+The repeated-occurrence real-backend scenario implements assertions for one
+initially expanded Cue group, Name-over-filename identity, the per-Cue match
+count, and the exact effective matching method once in the group header. It
+uses the visible `−` and `+` buttons to collapse and restore only that group's
+details. The ordinary two-Cue scenario additionally checks a supplied Start
+source-search bound in clock form and verifies that a blank-window Cue renders
+no Start/End placeholder.
+
+For every repeated occurrence, the executable test independently derives the
+unique Rank from raw score descending, temporal position ascending, and
+canonical index ascending. It compares those ranks with rows that remain in
+canonical chronological order, verifies compact clock Position plus exact raw
+seconds metadata, and verifies two-decimal Similarity plus exact raw-score
+metadata. The Results-level total badge and byte-identical Result download
+remain covered.
+
+Playback assertions activate the real S0013 Cue and occurrence routes and
+require `200 audio/wav`; no response is intercepted or fulfilled. They verify
+play/stop state, switching from occurrence Index 1 to Index 2 with only one
+active control, and a separate row whose Rank differs from Index to prove the
+request uses the canonical zero-based index. Collapsing the active group must
+reset playback, and expanding it must not restart audio. A deterministic
+retention/deletion failure is not orchestrated by this implementation, so the
+browser-specific local audition-error case remains not run; client/UI logic
+keeps that transient state structurally separate from the loaded Result.
+
+These are implemented assertions only. No Playwright/browser execution result
+is claimed by this document until the controlled real-backend test phase runs
+them.
+
 ## M6 minimum-evidence checklist
 
 The statuses below accurately describe this implementation phase. They must not
@@ -215,6 +251,11 @@ be changed to “passed” without an authorized real-backend execution.
 | Reduced-motion fallback (S0006) | Semantic Uploading status and static artwork remain while computed continuous animation is disabled | Not executed in this phase |
 | S0009 repeated occurrence | With `E2E_REPEATED_SOURCE_MEDIA_PATH` and `E2E_REPEATED_CUE_PATH`, one real cue returns 2+ rows, chronological positions, an exact total-match badge, two-decimal visible scores, raw-score titles, and no percent wording; no Result route is mocked | Implemented; not executed in this phase |
 | S0010 Settings/local preference | Accessible `0..1`/`0.01` range, default/custom distinction, malformed-storage fallback, `0.90` persistence, real request/Result threshold, reset/key removal, and subsequent omission; no route mocking | Implemented; not executed in this phase |
+| S0014 grouped Cue Results | One group per Cue, label precedence, conditional Start/End, per-Cue count/method, initially expanded `−`, isolated collapse, and `+` re-expansion | Implemented; not executed in this phase |
+| S0014 chronological Index and similarity Rank | Canonical row order plus independently derived raw-score/position/index Rank, clock Position/raw metadata, and two-decimal Similarity/raw metadata | Implemented; not executed in this phase |
+| S0014 Cue and occurrence audition | Real `200 audio/wav` requests, play/stop state, one active target, and canonical zero-based occurrence route independent of Rank | Implemented; not executed in this phase |
+| S0014 collapse/playback lifecycle | Active occurrence resets on collapse; rows return without automatic replay after expansion | Implemented; not executed in this phase |
+| S0014 audition failure locality | Loaded Result remains structurally independent from playback-only error state; deterministic real retention failure is not fabricated | Implemented UI/client logic; browser case not run |
 
 ## Test-phase recording requirements
 
