@@ -1,4 +1,4 @@
-# Local Diagnostic Observability (M7-04)
+# Local Diagnostic Observability (M7-04, extended by S0011)
 
 ## Purpose and boundary
 
@@ -6,6 +6,13 @@ This document records the minimum structured, `analysis_id`-correlated
 diagnostic baseline this issue applies across the API, application,
 executor, media-processing, persistence, and cleanup boundaries, and the
 data-minimization rule that bounds every emitted event.
+
+S0011 extends this same fixed schema with one additional optional field
+(`size_bytes`) and two additional `cleanup`-boundary events,
+`asset_storage_usage_observed` and `asset_maintenance_cycle_failed` -- see
+"Structured-event field schema" and "Where events are emitted" below. It
+does not add a new boundary, a new outcome value, or an arbitrary metrics
+dictionary.
 
 It does not restate `docs/architecture.md`'s own observability
 requirements (consult that document, "Observability and Configuration"
@@ -37,6 +44,7 @@ arbitrary extra field):
 | `correlation_id` | `str \| None` | The REST error envelope's own per-response identifier (`interfaces.rest_api.errors._correlation_id`), when the event is emitted from a request-scoped failure path. |
 | `duration_ms` | `float \| None` | An elapsed-time measurement reused from an already-persisted timestamp pair; this package never starts its own timer. |
 | `count` | `int \| None` | A non-identifying magnitude (for example how many Assets one cleanup pass deleted) -- never a list of identifiers. |
+| `size_bytes` | `int \| None` (S0011) | A non-negative-integer aggregate byte magnitude (for example the total bytes of every currently managed Asset). Like `count`, always an aggregate -- never a per-Asset size. A `bool` or negative value is rejected. |
 | `timestamp` | `str` | The event's own emission instant, ISO-8601, UTC, set internally by `emit_diagnostic_event`. |
 
 `analysis_id` and `correlation_id` are the two, previously disconnected,
@@ -84,7 +92,9 @@ required.
 | `media_processing` | `application/create_analysis.py`, `CreateAnalysisUseCase.create` | `media_canonicalization_failed` for any other pre-persistence Asset resolution/probing/decoding/canonicalization failure; no `analysis_id` is available here, since every rejection happens before an Analysis is ever persisted. |
 | `persistence` | `infrastructure/analysis_repository/sqlite_repository.py`, `create`/`add_owned_asset`/`transition` | `analysis_persistence_write_failed`, emitted only for a genuinely unexpected exception -- an already-existing/missing/invalid-record/rejected-transition outcome is excluded, since those are ordinary business-rule rejections, not persistence-layer failures. |
 | `cleanup` | `infrastructure/asset_storage/retention_policy.py`, `cleanup_expired_assets` | `asset_retention_cleanup_completed`, once per pass, carrying only `count` (the number of Assets actually deleted). |
-| `cleanup` | `infrastructure/asset_storage/retention_policy.py`, `cleanup_orphaned_assets` (S0012) | `asset_orphan_cleanup_completed`, once per pass, carrying only `count` (the number of physical Assets actually deleted). Its only S0012-specific magnitude is `count`; it never carries an Asset identifier, filename, storage path, checksum, media type, or file-size list -- broader storage-size observability belongs to S0011. |
+| `cleanup` | `infrastructure/asset_storage/retention_policy.py`, `cleanup_orphaned_assets` (S0012) | `asset_orphan_cleanup_completed`, once per pass, carrying only `count` (the number of physical Assets actually deleted). Its only S0012-specific magnitude is `count`; it never carries an Asset identifier, filename, storage path, checksum, media type, or file-size list. |
+| `cleanup` | `interfaces/rest_api/app.py`, `_emit_storage_usage_observed` (S0011) | `asset_storage_usage_observed`, once after startup maintenance and once after every successful periodic maintenance cycle, `outcome="succeeded"`, carrying `count` (total managed Asset files from `AssetStoragePort.list_entries()`) and `size_bytes` (their summed byte size) -- an aggregate observation of managed ACL Asset files only, never host/VPS filesystem capacity, SQLite database size, or a per-Asset identifier/path/size. |
+| `cleanup` | `interfaces/rest_api/app.py`, `_PeriodicAssetMaintenance._run_one_cycle` (S0011) | `asset_maintenance_cycle_failed`, `outcome="failed"`, emitted when an unexpected exception interrupts a periodic maintenance cycle, carrying only `category` (the exception's class name) -- never the raw exception message. The worker thread survives and returns to its wait loop; a later interval may retry. |
 
 `application`'s own pre-persistence Cue-validation event
 (`cue_validation_failed`, above) never logs `cue_id`, `label`, either trim

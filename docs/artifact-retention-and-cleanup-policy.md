@@ -175,14 +175,66 @@ Asset that becomes Analysis-referenced before its 24-hour orphan grace
 elapses is thereafter governed exclusively by the terminal-retention policy
 above, never by orphan age again.
 
+## Eligibility policy vs. execution schedule (S0011)
+
+Everything above this section is *eligibility policy*: the fixed rules that
+decide whether a given Asset identifier may be deleted right now. S0011 does
+not change a single one of those rules -- the seven-day terminal-retention
+minimum, the 24-hour orphan grace minimum, the shared-reference and
+pre-delete-refresh discipline, and the "preserve on ambiguity" default all
+apply exactly as documented above, whichever caller happens to invoke
+`cleanup_expired_assets`/`cleanup_orphaned_assets`.
+
+*Execution schedule* is a separate, later concern: when these two eligibility
+policies actually run. Before S0011 they ran exactly once, at process
+startup (see "Both cleanup passes are startup-only" below, now superseded).
+As of S0011 (`docs/retention-and-cleanup.md` has the full applied wiring),
+the API process also repeats the same startup order -- owned-retention
+cleanup, then orphan cleanup -- on a configured recurring interval (default
+24 hours, minimum one hour, `AUDIO_CUE_LOCATOR_ASSET_CLEANUP_INTERVAL_SECONDS`)
+for as long as it keeps running, in addition to the one startup pass. No
+threshold, window, or eligibility rule changes because periodic execution
+exists; periodic execution only means eligible Assets are revisited sooner
+than the next process restart.
+
+### Process-local protected-ID rule (S0011)
+
+Running cleanup while the API also serves requests introduces one narrow
+race periodic execution must guard against: an in-flight
+`CreateAnalysisUseCase.create(...)` request can start validating/
+canonicalizing an Asset identifier *before* that Analysis is durably
+persisted, and a periodic cleanup cycle running at that exact moment would
+otherwise see zero persisted references (or an elapsed orphan grace window)
+and delete bytes the request is still using.
+
+S0011 closes that race with one process-local, in-memory reservation:
+`interfaces.rest_api.app`'s composition root reserves every Asset id a
+create request references before its first physical read, and periodic
+cleanup receives an immutable snapshot of every currently-reserved id
+(`protected_asset_ids`) while it holds the maintenance coordination
+boundary. A protected identifier is always preserved, on top of every
+existing check above -- it is purely additive and never makes an otherwise
+ineligible Asset eligible.
+
+This reservation is **not** a durable ownership mechanism. It is held only
+in process memory, only for the duration of one in-flight creation request,
+and is released the moment that Analysis is persisted (its persisted
+references become the durable ownership authority from then on, exactly as
+described in "Ownership model" above) or the request fails validation. A
+process restart clears every reservation; nothing about it is written to
+SQLite or to Asset storage. Startup cleanup calls omit
+`protected_asset_ids` entirely, since no request can yet hold a reservation
+before the process has finished starting.
+
 ## Known limitations
 
 - No derived-artifact ingestion pipeline is added. The ownership contract
   applies as and when such an Asset is persisted and linked.
 - No durable Result store is added; result retention is prospective.
-- Both cleanup passes are startup-only local routines
-  (`docs/retention-and-cleanup.md`); periodic/background execution is a
-  later, separately authorized decision (S0011).
+- Both cleanup passes run at startup and, as of S0011, periodically for as
+  long as the process keeps running -- see "Eligibility policy vs.
+  execution schedule (S0011)" above and `docs/retention-and-cleanup.md` for
+  the full applied wiring.
 - Analysis records are not deleted or rewritten when their Asset bytes are
   removed. A repeated cleanup therefore reports already-missing bytes rather
   than claiming another deletion.

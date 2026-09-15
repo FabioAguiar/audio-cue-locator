@@ -146,8 +146,8 @@ so this data persists across `docker compose restart`/`down` (without
 context (excluded via [`.dockerignore`](../.dockerignore)).
 
 `/app/var/asset_storage` holds every uploaded and derived physical Asset as
-an extensionless, canonical-UUID-named file. Two independent, startup-only
-cleanup rules bound how long those bytes persist
+an extensionless, canonical-UUID-named file. Two independent cleanup rules
+bound how long those bytes persist
 (`docs/artifact-retention-and-cleanup-policy.md`,
 `docs/retention-and-cleanup.md`):
 
@@ -160,17 +160,41 @@ cleanup rules bound how long those bytes persist
   after it was written to local storage, using the file's own storage
   timestamp, never an Analysis timestamp.
 
-Both rules run once, at process startup, immediately before the API can
-claim a queued Analysis; neither is a periodic or per-request mechanism.
-Recurring/background cleanup remains explicitly out of scope until a
-future, separately authorized S0011 change. A consequence operators should
-expect: an upload left unreferenced for 24 hours or more is no longer
-guaranteed to still be available for a later Analysis-creation attempt --
-this is accepted staging behavior for the normal upload-then-create flow,
-not a bug.
+Both rules run once at process startup, immediately before the API can
+claim a queued Analysis, and -- as of S0011 -- also run periodically
+thereafter, for as long as the `api` process keeps running: the API process
+itself performs its own local periodic housekeeping. No host cron job and
+no additional container are required or introduced. The periodic interval
+is:
 
-To inspect current local Asset storage usage safely (read-only, no state
-change):
+- **`AUDIO_CUE_LOCATOR_ASSET_CLEANUP_INTERVAL_SECONDS`** -- default `86400`
+  (24 hours), minimum `3600` (one hour). A non-numeric, non-finite, or
+  sub-one-hour value fails the `api` container's startup explicitly rather
+  than silently falling back.
+
+An in-flight Analysis-creation request that is already using an Asset id is
+protected from periodic deletion by a narrow, process-local, in-memory
+reservation (`docs/retention-and-cleanup.md`, "Asset reservation /
+maintenance coordination boundary (S0011)"); this is not durable and does
+not change either rule's eligibility window above. A consequence operators
+should still expect: an upload left unreferenced for 24 hours or more is no
+longer guaranteed to still be available for a later Analysis-creation
+attempt that has not yet started using it -- this is accepted staging
+behavior for the normal upload-then-create flow, not a bug.
+
+To observe current local Asset storage usage from the logs (no filesystem
+access required), look for the `asset_storage_usage_observed` structured
+event -- emitted once after startup maintenance and once after every
+periodic maintenance cycle (`docs/observability.md`) -- and read its
+`count` (managed Asset file count) and `size_bytes` (their total size)
+fields:
+
+```bash
+docker compose logs api | grep asset_storage_usage_observed
+```
+
+To inspect current local Asset storage usage directly and safely
+(read-only, no state change):
 
 ```bash
 du -sh /app/var
@@ -221,6 +245,8 @@ service if needed:
 - `AUDIO_CUE_LOCATOR_MAX_SOURCE_MEDIA_UPLOAD_BYTES`
 - `AUDIO_CUE_LOCATOR_MAX_CUE_UPLOAD_BYTES`
 - `AUDIO_CUE_LOCATOR_MAX_CUE_COUNT`
+- `AUDIO_CUE_LOCATOR_ASSET_CLEANUP_INTERVAL_SECONDS` (S0011; default
+  `86400`, minimum `3600` -- see "Local storage" above)
 
 ## Known limitations and open items
 

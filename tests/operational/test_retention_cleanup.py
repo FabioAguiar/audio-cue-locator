@@ -29,8 +29,12 @@ inert.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import logging
 import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -54,9 +58,14 @@ from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository impo
 from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage import (
     LocalFilesystemAssetStorage,
 )
+from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
+    CleanupReport,
+    OrphanCleanupReport,
+)
 from audio_cue_locator.infrastructure.execution.restart_recovery import (
     INTERRUPTED_ERROR_MESSAGE,
 )
+from audio_cue_locator.observability.events import LOGGER_NAME
 
 app_module = importlib.import_module("audio_cue_locator.interfaces.rest_api.app")
 
@@ -417,6 +426,7 @@ def test_recovery_and_both_cleanup_phases_run_before_executor_construction(
     real_run_startup_recovery = app_module.run_startup_recovery
     real_cleanup_expired_assets = app_module.cleanup_expired_assets
     real_cleanup_orphaned_assets = app_module.cleanup_orphaned_assets
+    real_emit_storage_usage_observed = app_module._emit_storage_usage_observed
     real_executor_cls = app_module.LocalAnalysisExecutor
 
     def _recording_recovery(repository, **kwargs):
@@ -431,6 +441,10 @@ def test_recovery_and_both_cleanup_phases_run_before_executor_construction(
         order.append("orphan_cleanup")
         return real_cleanup_orphaned_assets(repository, storage, **kwargs)
 
+    def _recording_storage_usage_observed(storage):
+        order.append("storage_usage_observed")
+        return real_emit_storage_usage_observed(storage)
+
     class _RecordingExecutor(real_executor_cls):
         def __init__(self, *args, **kwargs):
             order.append("executor_constructed")
@@ -439,6 +453,9 @@ def test_recovery_and_both_cleanup_phases_run_before_executor_construction(
     monkeypatch.setattr(app_module, "run_startup_recovery", _recording_recovery)
     monkeypatch.setattr(app_module, "cleanup_expired_assets", _recording_owned_cleanup)
     monkeypatch.setattr(app_module, "cleanup_orphaned_assets", _recording_orphan_cleanup)
+    monkeypatch.setattr(
+        app_module, "_emit_storage_usage_observed", _recording_storage_usage_observed
+    )
     monkeypatch.setattr(app_module, "LocalAnalysisExecutor", _RecordingExecutor)
 
     storage = app_module._build_asset_storage()
@@ -448,6 +465,7 @@ def test_recovery_and_both_cleanup_phases_run_before_executor_construction(
             "recovery",
             "owned_retention_cleanup",
             "orphan_cleanup",
+            "storage_usage_observed",
             "executor_constructed",
         ]
     finally:
@@ -599,3 +617,346 @@ def test_create_app_applies_recovery_and_cleanup_together(
             category=FailureCategory.INTERNAL_FAILURE,
             message=INTERRUPTED_ERROR_MESSAGE,
         )
+
+
+# --- S0011: _AssetMaintenanceCoordinator concurrency -------------------------
+
+
+def test_reserved_id_appears_in_maintenance_snapshot():
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    asset_id = _asset_id()
+
+    with coordinator.reserve((asset_id,)):
+        with coordinator.maintenance_snapshot() as protected:
+            assert asset_id in protected
+
+
+def test_maintenance_snapshot_is_empty_without_an_active_reservation():
+    coordinator = app_module._AssetMaintenanceCoordinator()
+
+    with coordinator.maintenance_snapshot() as protected:
+        assert protected == frozenset()
+
+
+def test_shared_reservation_reference_counting_keeps_protection_until_both_release():
+    """S0011 4.3: if two requests reserve the same Asset simultaneously,
+    protection remains active until *both* reservations release -- a plain
+    set that unprotects on the first release would be insufficient."""
+
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    asset_id = _asset_id()
+
+    first = coordinator.reserve((asset_id,))
+    second = coordinator.reserve((asset_id,))
+    first.__enter__()
+    second.__enter__()
+
+    first.__exit__(None, None, None)
+    with coordinator.maintenance_snapshot() as protected:
+        assert asset_id in protected  # second reservation still held
+
+    second.__exit__(None, None, None)
+    with coordinator.maintenance_snapshot() as protected:
+        assert asset_id not in protected
+
+
+def test_maintenance_boundary_blocks_a_new_reservation_until_cycle_release():
+    """S0011 4.7/4.11: a `reserve()` call registered while a maintenance
+    cycle holds `maintenance_snapshot()` must wait until that snapshot's
+    `with` block exits, and succeeds immediately afterward."""
+
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    asset_id = _asset_id()
+    entered_snapshot = threading.Event()
+    release_snapshot = threading.Event()
+    reservation_acquired = threading.Event()
+
+    def _hold_snapshot():
+        with coordinator.maintenance_snapshot():
+            entered_snapshot.set()
+            release_snapshot.wait(timeout=5.0)
+
+    snapshot_thread = threading.Thread(target=_hold_snapshot)
+    snapshot_thread.start()
+    assert entered_snapshot.wait(timeout=5.0)
+
+    def _reserve():
+        with coordinator.reserve((asset_id,)):
+            reservation_acquired.set()
+
+    reserve_thread = threading.Thread(target=_reserve)
+    reserve_thread.start()
+
+    # The reservation must not have been able to proceed while the
+    # maintenance boundary is still held.
+    assert not reservation_acquired.wait(timeout=0.2)
+
+    release_snapshot.set()
+    snapshot_thread.join(timeout=5.0)
+
+    # ... and must succeed promptly once the boundary is released.
+    assert reservation_acquired.wait(timeout=5.0)
+    reserve_thread.join(timeout=5.0)
+
+
+# --- S0011: _PeriodicAssetMaintenance lifecycle ------------------------------
+
+
+def _empty_cleanup_report(*_args, **_kwargs) -> CleanupReport:
+    return CleanupReport((), (), (), ())
+
+
+def _empty_orphan_report(*_args, **_kwargs) -> OrphanCleanupReport:
+    return OrphanCleanupReport((), (), (), ())
+
+
+def test_periodic_runner_does_not_run_a_cycle_immediately_on_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    cycle_started = threading.Event()
+
+    def _recording_cleanup_expired(*args, **kwargs):
+        cycle_started.set()
+        return _empty_cleanup_report(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "cleanup_expired_assets", _recording_cleanup_expired)
+    monkeypatch.setattr(app_module, "cleanup_orphaned_assets", _empty_orphan_report)
+
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=None, storage=storage, coordinator=coordinator, interval_seconds=1000.0
+    )
+    runner.start()
+    try:
+        assert not cycle_started.wait(timeout=0.2)
+    finally:
+        runner.stop()
+
+
+def test_periodic_runner_runs_a_cycle_after_the_configured_interval(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A short `interval_seconds` supplied directly to the private runner's
+    constructor -- a test-only seam -- proves the wait-then-run loop without
+    weakening the one-hour production minimum enforced by
+    `_asset_cleanup_interval_seconds`."""
+
+    cycle_ran = threading.Event()
+
+    def _recording_cleanup_expired(*args, **kwargs):
+        cycle_ran.set()
+        return _empty_cleanup_report(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "cleanup_expired_assets", _recording_cleanup_expired)
+    monkeypatch.setattr(app_module, "cleanup_orphaned_assets", _empty_orphan_report)
+
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=None, storage=storage, coordinator=coordinator, interval_seconds=0.05
+    )
+    runner.start()
+    try:
+        assert cycle_ran.wait(timeout=2.0)
+    finally:
+        runner.stop()
+
+
+def test_periodic_cycle_order_is_owned_then_orphan_then_storage_observation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    order: list[str] = []
+
+    def _recording_owned(*args, **kwargs):
+        order.append("owned")
+        return _empty_cleanup_report(*args, **kwargs)
+
+    def _recording_orphan(*args, **kwargs):
+        order.append("orphan")
+        return _empty_orphan_report(*args, **kwargs)
+
+    def _recording_storage_usage(storage):
+        order.append("storage_usage")
+
+    monkeypatch.setattr(app_module, "cleanup_expired_assets", _recording_owned)
+    monkeypatch.setattr(app_module, "cleanup_orphaned_assets", _recording_orphan)
+    monkeypatch.setattr(
+        app_module, "_emit_storage_usage_observed", _recording_storage_usage
+    )
+
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=None, storage=storage, coordinator=coordinator, interval_seconds=0.05
+    )
+    runner.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while len(order) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        runner.stop()
+
+    assert order[:3] == ["owned", "orphan", "storage_usage"]
+
+
+def test_stop_interrupts_an_in_progress_wait_and_joins_the_worker(tmp_path: Path):
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=None, storage=storage, coordinator=coordinator, interval_seconds=1000.0
+    )
+    runner.start()
+
+    started_at = time.monotonic()
+    runner.stop()
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 2.0  # far shorter than the configured 1000s interval
+    assert runner._thread is None
+
+
+def test_calling_start_twice_does_not_spawn_a_second_worker(tmp_path: Path):
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=None, storage=storage, coordinator=coordinator, interval_seconds=1000.0
+    )
+    runner.start()
+    first_thread = runner._thread
+    runner.start()
+    try:
+        assert runner._thread is first_thread
+        assert sum(
+            1 for t in threading.enumerate() if t.name == "asset-maintenance"
+        ) == 1
+    finally:
+        runner.stop()
+
+
+def test_failed_cycle_emits_diagnostic_and_a_later_cycle_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    call_count = {"n": 0}
+    second_cycle_ran = threading.Event()
+
+    def _flaky_cleanup_expired(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("boom")
+        second_cycle_ran.set()
+        return _empty_cleanup_report(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "cleanup_expired_assets", _flaky_cleanup_expired)
+    monkeypatch.setattr(app_module, "cleanup_orphaned_assets", _empty_orphan_report)
+
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=None, storage=storage, coordinator=coordinator, interval_seconds=0.05
+    )
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        runner.start()
+        try:
+            assert second_cycle_ran.wait(timeout=3.0)
+        finally:
+            runner.stop()
+
+    failure_events = [
+        record.audio_cue_locator_event
+        for record in caplog.records
+        if getattr(record, "audio_cue_locator_event", {}).get("event")
+        == "asset_maintenance_cycle_failed"
+    ]
+    assert len(failure_events) >= 1
+    assert failure_events[0]["boundary"] == "cleanup"
+    assert failure_events[0]["outcome"] == "failed"
+    assert failure_events[0]["category"] == "RuntimeError"
+    assert call_count["n"] >= 2  # the failed cycle did not stop later retries
+
+
+# --- S0011: FastAPI lifespan start/stop --------------------------------------
+
+
+def _patch_periodic_maintenance_start_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    calls: list[str] = []
+    real_start = app_module._PeriodicAssetMaintenance.start
+    real_stop = app_module._PeriodicAssetMaintenance.stop
+    monkeypatch.setattr(
+        app_module._PeriodicAssetMaintenance,
+        "start",
+        lambda self: calls.append("start") or real_start(self),
+    )
+    monkeypatch.setattr(
+        app_module._PeriodicAssetMaintenance,
+        "stop",
+        lambda self: calls.append("stop") or real_stop(self),
+    )
+    return calls
+
+
+def _capture_executor_via_build_analysis_use_cases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list:
+    """`create_app()` builds a real `LocalAnalysisExecutor`
+    (`_build_analysis_use_cases`, not returned to the caller); these
+    lifespan tests never submit an Analysis, but must still shut that
+    executor's worker pool down so no background thread survives past the
+    test, mirroring every other caller's `_shutdown(create_use_case)` in
+    this file."""
+
+    executors: list = []
+    real_builder = app_module._build_analysis_use_cases
+
+    def _capturing_builder(storage):
+        create_use_case, query_use_case = real_builder(storage)
+        executors.append(create_use_case._executor)
+        return create_use_case, query_use_case
+
+    monkeypatch.setattr(app_module, "_build_analysis_use_cases", _capturing_builder)
+    return executors
+
+
+def test_create_app_alone_does_not_start_the_periodic_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _isolate_env(monkeypatch, tmp_path)
+    calls = _patch_periodic_maintenance_start_stop(monkeypatch)
+    executors = _capture_executor_via_build_analysis_use_cases(monkeypatch)
+
+    app_module.create_app()
+
+    try:
+        assert calls == []
+    finally:
+        for executor in executors:
+            executor.shutdown()
+
+
+def test_asgi_lifespan_starts_exactly_one_worker_and_stops_it_on_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    _isolate_env(monkeypatch, tmp_path)
+    calls = _patch_periodic_maintenance_start_stop(monkeypatch)
+    executors = _capture_executor_via_build_analysis_use_cases(monkeypatch)
+
+    app = app_module.create_app()
+    try:
+        assert calls == []  # create_app() alone never starts the worker
+
+        async def _scenario() -> None:
+            async with app.router.lifespan_context(app):
+                assert calls == ["start"]
+
+        asyncio.run(_scenario())
+
+        assert calls == ["start", "stop"]
+    finally:
+        for executor in executors:
+            executor.shutdown()

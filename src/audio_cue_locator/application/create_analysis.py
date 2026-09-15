@@ -111,11 +111,12 @@ import io
 import math
 import tempfile
 import wave
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, ContextManager
 from uuid import uuid4
 
 import numpy as np
@@ -353,6 +354,25 @@ class CueRequest:
 
 
 ClockFn = Callable[[], datetime]
+
+ReserveAssetIdsFn = Callable[[Collection[str]], ContextManager[None]]
+"""S0011: the Application-owned shape of an injected Asset-reservation
+boundary. `CreateAnalysisUseCase` depends on this callable abstraction only
+-- never on `interfaces.rest_api.app`'s concrete process-local coordinator
+-- so Application never imports the REST composition root (`docs/
+architecture.md`, Principle 2)."""
+
+
+@contextmanager
+def _no_op_reservation(asset_ids: Collection[str]) -> None:
+    """Default `ReserveAssetIdsFn`: no coordination, matching this project's
+    behavior before S0011. `interfaces.rest_api.app`'s composition root
+    injects the real process-local reservation; every other caller
+    (including every test that does not exercise S0011 concurrency directly)
+    is unaffected."""
+
+    del asset_ids
+    yield
 
 
 def _default_clock() -> datetime:
@@ -722,6 +742,7 @@ class CreateAnalysisUseCase:
         max_source_media_duration_seconds: float = DEFAULT_MAX_SOURCE_MEDIA_DURATION_SECONDS,
         max_cue_media_duration_seconds: float = DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS,
         clock: ClockFn = _default_clock,
+        reserve_asset_ids: ReserveAssetIdsFn = _no_op_reservation,
     ) -> None:
         if max_cue_count < 1:
             raise ValueError("max_cue_count must be a positive integer")
@@ -737,6 +758,7 @@ class CreateAnalysisUseCase:
         self._max_source_media_duration_seconds = max_source_media_duration_seconds
         self._max_cue_media_duration_seconds = max_cue_media_duration_seconds
         self._clock = clock
+        self._reserve_asset_ids = reserve_asset_ids
 
     @property
     def max_cue_count(self) -> int:
@@ -781,81 +803,104 @@ class CreateAnalysisUseCase:
                 f"maximum of {self._max_cue_count}"
             )
 
-        try:
-            canonical_source = self._resolve_and_canonicalize(
-                source_asset_id,
-                allowed_media_types=SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES,
-                role="source_asset_id",
-                max_duration_seconds=self._max_source_media_duration_seconds,
-            )
-
-            cue_references: list[CueAssetReference] = []
-            canonical_cues: dict[str, np.ndarray] = {}
-            for cue in cues:
-                _validate_source_search_window(cue, canonical_source.shape[0])
-                # The Cue guardrail and canonicalization always apply to
-                # the complete Cue. The persisted bounds constrain the
-                # source slice later, in Application orchestration.
-                canonical_cues[cue.cue_id] = self._resolve_and_canonicalize(
-                    cue.asset_id,
-                    allowed_media_types=CUE_SUPPORTED_MEDIA_TYPES,
-                    role=f"cues[{cue.cue_id!r}].asset_id",
-                    max_duration_seconds=self._max_cue_media_duration_seconds,
-                )
-                cue_references.append(
-                    CueAssetReference(
-                        cue_id=cue.cue_id,
-                        asset_id=cue.asset_id,
-                        label=cue.label,
-                        trim_start_seconds=cue.trim_start_seconds,
-                        trim_end_seconds=cue.trim_end_seconds,
-                    )
-                )
-        except InvalidCueRequestError:
-            # A duration-aware source-window rejection, once the source's
-            # canonical duration is known, is an
-            # Application validation outcome, not a media/canonicalization
-            # failure -- kept distinguishable from the `except Exception`
-            # branch below so an operator can tell "the requested Cue
-            # interval was invalid" apart from "the Asset's own content
-            # could not be canonicalized" (docs/observability.md).
-            # analysis_id is never available here, for the same reason
-            # noted below: no Analysis is persisted yet.
-            emit_diagnostic_event(
-                event="cue_validation_failed",
-                boundary="application",
-                outcome="failed",
-                category="InvalidCueRequestError",
-            )
-            raise
-        except Exception as exc:
-            # M7-04: application/media-processing boundary diagnostic.
-            # analysis_id is never available here: every rejection this
-            # `except` observes happens before `AnalysisRepositoryPort.
-            # create` ever persists a record (this method's own docstring,
-            # "before ... ever called"), so no Analysis identifier exists
-            # yet to attach.
-            emit_diagnostic_event(
-                event="media_canonicalization_failed",
-                boundary="media_processing",
-                outcome="failed",
-                category=type(exc).__name__,
-            )
-            raise
-
-        analysis_id = str(uuid4())
-        record = self._repository.create(
-            analysis_id=analysis_id,
-            source_asset_id=source_asset_id,
-            cues=tuple(cue_references),
-            effective_configuration=effective_configuration,
-            queued_at=self._clock(),
+        # S0011: reserve every referenced Asset id -- source plus every Cue,
+        # deduplicated but order-stable -- before the first physical
+        # `AssetStoragePort.read` below, and keep the reservation active
+        # through persistence. The default `_no_op_reservation` makes this a
+        # no-op everywhere except the REST composition root, which injects
+        # the real process-local coordinator (`interfaces.rest_api.app.
+        # _AssetMaintenanceCoordinator`) so a periodic cleanup cycle can
+        # never delete an Asset this in-flight request is still validating/
+        # canonicalizing.
+        asset_ids = tuple(
+            dict.fromkeys((source_asset_id, *(cue.asset_id for cue in cues)))
         )
+
+        with self._reserve_asset_ids(asset_ids):
+            try:
+                canonical_source = self._resolve_and_canonicalize(
+                    source_asset_id,
+                    allowed_media_types=SOURCE_MEDIA_SUPPORTED_MEDIA_TYPES,
+                    role="source_asset_id",
+                    max_duration_seconds=self._max_source_media_duration_seconds,
+                )
+
+                cue_references: list[CueAssetReference] = []
+                canonical_cues: dict[str, np.ndarray] = {}
+                for cue in cues:
+                    _validate_source_search_window(cue, canonical_source.shape[0])
+                    # The Cue guardrail and canonicalization always apply to
+                    # the complete Cue. The persisted bounds constrain the
+                    # source slice later, in Application orchestration.
+                    canonical_cues[cue.cue_id] = self._resolve_and_canonicalize(
+                        cue.asset_id,
+                        allowed_media_types=CUE_SUPPORTED_MEDIA_TYPES,
+                        role=f"cues[{cue.cue_id!r}].asset_id",
+                        max_duration_seconds=self._max_cue_media_duration_seconds,
+                    )
+                    cue_references.append(
+                        CueAssetReference(
+                            cue_id=cue.cue_id,
+                            asset_id=cue.asset_id,
+                            label=cue.label,
+                            trim_start_seconds=cue.trim_start_seconds,
+                            trim_end_seconds=cue.trim_end_seconds,
+                        )
+                    )
+            except InvalidCueRequestError:
+                # A duration-aware source-window rejection, once the source's
+                # canonical duration is known, is an
+                # Application validation outcome, not a media/canonicalization
+                # failure -- kept distinguishable from the `except Exception`
+                # branch below so an operator can tell "the requested Cue
+                # interval was invalid" apart from "the Asset's own content
+                # could not be canonicalized" (docs/observability.md).
+                # analysis_id is never available here, for the same reason
+                # noted below: no Analysis is persisted yet. The `with`
+                # block above still releases the reservation on this path.
+                emit_diagnostic_event(
+                    event="cue_validation_failed",
+                    boundary="application",
+                    outcome="failed",
+                    category="InvalidCueRequestError",
+                )
+                raise
+            except Exception as exc:
+                # M7-04: application/media-processing boundary diagnostic.
+                # analysis_id is never available here: every rejection this
+                # `except` observes happens before `AnalysisRepositoryPort.
+                # create` ever persists a record (this method's own docstring,
+                # "before ... ever called"), so no Analysis identifier exists
+                # yet to attach. The `with` block above still releases the
+                # reservation on this path.
+                emit_diagnostic_event(
+                    event="media_canonicalization_failed",
+                    boundary="media_processing",
+                    outcome="failed",
+                    category=type(exc).__name__,
+                )
+                raise
+
+            analysis_id = str(uuid4())
+            record = self._repository.create(
+                analysis_id=analysis_id,
+                source_asset_id=source_asset_id,
+                cues=tuple(cue_references),
+                effective_configuration=effective_configuration,
+                queued_at=self._clock(),
+            )
+            # The reservation releases here, when this `with` block exits:
+            # the Analysis is already durably persisted, so the repository's
+            # own references are now the durable ownership authority
+            # (`docs/artifact-retention-and-cleanup-policy.md`) and the
+            # process-local reservation is no longer needed.
 
         # Fire-and-forget: LocalAnalysisExecutor.submit never blocks its
         # caller, and this use case does not wait on the returned Future
         # either, so acoustic matching never delays this method's return
-        # (formal issue's own top-severity risk).
+        # (formal issue's own top-severity risk). `submit` receives already-
+        # canonical arrays and therefore needs no physical Asset bytes after
+        # persistence, so it runs after the reservation above has released.
         self._executor.submit(analysis_id, canonical_source, canonical_cues)
 
         return record

@@ -84,8 +84,11 @@ first request. See `docs/observability.md` for the emitted event schema.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
+from collections.abc import Collection
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -139,7 +142,7 @@ from audio_cue_locator.interfaces.rest_api.schemas import (
     AssetPublic,
     ErrorPublic,
 )
-from audio_cue_locator.observability import configure_logging
+from audio_cue_locator.observability import configure_logging, emit_diagnostic_event
 
 API_VERSION = "v1"
 API_V1_PREFIX = f"/api/{API_VERSION}"
@@ -191,6 +194,14 @@ _MAX_SOURCE_MEDIA_DURATION_SECONDS_ENV = (
 _MAX_CUE_MEDIA_DURATION_SECONDS_ENV = "AUDIO_CUE_LOCATOR_MAX_CUE_MEDIA_DURATION_SECONDS"
 _LOG_LEVEL_ENV = "AUDIO_CUE_LOCATOR_LOG_LEVEL"
 _DEFAULT_LOG_LEVEL = "INFO"
+_ASSET_CLEANUP_INTERVAL_SECONDS_ENV = "AUDIO_CUE_LOCATOR_ASSET_CLEANUP_INTERVAL_SECONDS"
+_DEFAULT_ASSET_CLEANUP_INTERVAL_SECONDS = 86400.0
+"""S0011: default periodic Asset-maintenance interval (24 hours)."""
+_MINIMUM_ASSET_CLEANUP_INTERVAL_SECONDS = 3600.0
+"""S0011: shortest permitted periodic Asset-maintenance interval (one hour).
+Never exposed as a smaller production-configurable value; a test seam that
+needs a shorter wait constructs `_PeriodicAssetMaintenance` directly instead
+of going through this environment-variable convention."""
 
 
 def _log_level() -> str:
@@ -375,6 +386,170 @@ def _max_cue_media_duration_seconds() -> float:
     return float(configured) if configured else DEFAULT_MAX_CUE_MEDIA_DURATION_SECONDS
 
 
+def _asset_cleanup_interval_seconds() -> float:
+    """Explicit, environment-overridable periodic Asset-maintenance interval
+    (S0011), layered over `_DEFAULT_ASSET_CLEANUP_INTERVAL_SECONDS` following
+    the same per-file configuration convention as every other `_*_ENV`
+    helper above. Unlike those helpers, an invalid value here must fail
+    application construction explicitly rather than silently falling back
+    (S0011 acceptance criterion "Invalid interval fails explicitly"): a
+    non-numeric, non-finite, or sub-one-hour value raises `ValueError`
+    instead of being coerced or ignored."""
+
+    configured = os.environ.get(_ASSET_CLEANUP_INTERVAL_SECONDS_ENV)
+    if not configured:
+        return _DEFAULT_ASSET_CLEANUP_INTERVAL_SECONDS
+    try:
+        value = float(configured)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_ASSET_CLEANUP_INTERVAL_SECONDS_ENV} must be a numeric value "
+            "in seconds"
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{_ASSET_CLEANUP_INTERVAL_SECONDS_ENV} must be a finite value"
+        )
+    if value < _MINIMUM_ASSET_CLEANUP_INTERVAL_SECONDS:
+        raise ValueError(
+            f"{_ASSET_CLEANUP_INTERVAL_SECONDS_ENV} must be at least "
+            f"{_MINIMUM_ASSET_CLEANUP_INTERVAL_SECONDS:.0f} seconds (one hour)"
+        )
+    return value
+
+
+def _emit_storage_usage_observed(storage: LocalFilesystemAssetStorage) -> None:
+    """Emit exactly one `asset_storage_usage_observed` event (S0011):
+    aggregate managed-Asset count and total bytes only, from
+    `AssetStoragePort.list_entries()` -- never a per-Asset identifier, path,
+    or size. Called once after startup maintenance and once after every
+    successful periodic maintenance cycle."""
+
+    entries = storage.list_entries()
+    emit_diagnostic_event(
+        event="asset_storage_usage_observed",
+        boundary="cleanup",
+        outcome="succeeded",
+        count=len(entries),
+        size_bytes=sum(entry.size_bytes for entry in entries),
+    )
+
+
+class _AssetMaintenanceCoordinator:
+    """S0011: the one process-local coordination boundary between an
+    in-flight `CreateAnalysisUseCase.create(...)` request and periodic Asset
+    maintenance. Owns a single `threading.Lock` and an Asset-id reservation
+    reference-count map; never persisted (`docs/artifact-retention-and-
+    cleanup-policy.md`: reservation is not durable ownership).
+
+    `reserve(...)` only briefly holds the lock to update counts, so
+    concurrent Analysis-creation requests canonicalize independently.
+    `maintenance_snapshot(...)` holds the lock for its entire `with` body,
+    so a new reservation registration blocks until an in-progress
+    maintenance cycle finishes, and a maintenance cycle always sees every
+    Asset id already reserved by that point."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reservation_counts: dict[str, int] = {}
+
+    @contextmanager
+    def reserve(self, asset_ids: Collection[str]):
+        ids = tuple(dict.fromkeys(asset_ids))
+        with self._lock:
+            for asset_id in ids:
+                self._reservation_counts[asset_id] = (
+                    self._reservation_counts.get(asset_id, 0) + 1
+                )
+        try:
+            yield
+        finally:
+            with self._lock:
+                for asset_id in ids:
+                    remaining = self._reservation_counts.get(asset_id, 0) - 1
+                    if remaining <= 0:
+                        self._reservation_counts.pop(asset_id, None)
+                    else:
+                        self._reservation_counts[asset_id] = remaining
+
+    @contextmanager
+    def maintenance_snapshot(self):
+        with self._lock:
+            yield frozenset(self._reservation_counts)
+
+
+class _PeriodicAssetMaintenance:
+    """S0011: a private, standard-library-only (`threading.Thread` +
+    `threading.Event`) periodic worker that repeats the same owned-then-
+    orphan cleanup order startup already applies, followed by one storage-
+    usage observation, every `interval_seconds`. Waits a full interval
+    before its first cycle -- the composition root already performs startup
+    maintenance once, so an immediate duplicate cycle is never run."""
+
+    def __init__(
+        self,
+        *,
+        repository: Any,
+        storage: LocalFilesystemAssetStorage,
+        coordinator: _AssetMaintenanceCoordinator,
+        interval_seconds: float,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        self._repository = repository
+        self._storage = storage
+        self._coordinator = coordinator
+        self._interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="asset-maintenance", daemon=False
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join()
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            self._run_one_cycle()
+
+    def _run_one_cycle(self) -> None:
+        try:
+            with self._coordinator.maintenance_snapshot() as protected_ids:
+                cleanup_expired_assets(
+                    self._repository,
+                    self._storage,
+                    protected_asset_ids=protected_ids,
+                )
+                cleanup_orphaned_assets(
+                    self._repository,
+                    self._storage,
+                    protected_asset_ids=protected_ids,
+                )
+                _emit_storage_usage_observed(self._storage)
+        except Exception as exc:
+            # S0011: a maintenance exception must never terminate the API
+            # process or the worker thread -- emit one sanitized diagnostic
+            # (category only, never the raw exception text) and return to
+            # the wait loop so a later interval may retry.
+            emit_diagnostic_event(
+                event="asset_maintenance_cycle_failed",
+                boundary="cleanup",
+                outcome="failed",
+                category=type(exc).__name__,
+            )
+
+
 def _build_create_analysis_use_case(
     storage: LocalFilesystemAssetStorage,
 ) -> CreateAnalysisUseCase:
@@ -410,11 +585,22 @@ def _build_analysis_use_cases(
     (S0012) then deletes physical Assets that remain unreferenced by every
     persisted Analysis after the S0012 24-hour grace window, using the
     physical inventory and every persisted reference left standing once
-    owned-retention cleanup has already run. None of the three calls is
-    wired to a periodic trigger: this local-first, single-process runtime
-    has no background-scheduler mechanism, so all three run once per
-    process start (`docs/retention-and-cleanup.md`).
+    owned-retention cleanup has already run. Startup maintenance always runs
+    exactly once per process start, never periodically (`docs/retention-
+    and-cleanup.md`); S0011 additionally starts a periodic worker that
+    repeats the same two cleanup calls on a configured interval, but only
+    once the FastAPI application reaches ASGI startup -- never merely
+    because this function, or `create_app()`, was called (see
+    `_PeriodicAssetMaintenance`, constructed below and started/stopped by
+    `create_app()`'s lifespan hook).
+
+    S0011's interval is validated first, before any recovery/cleanup I/O
+    runs, so an invalid `AUDIO_CUE_LOCATOR_ASSET_CLEANUP_INTERVAL_SECONDS`
+    fails application construction explicitly rather than silently falling
+    back or running partial startup work.
     """
+
+    interval_seconds = _asset_cleanup_interval_seconds()
 
     db_path = _analysis_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,11 +608,13 @@ def _build_analysis_use_cases(
     run_startup_recovery(repository)
     cleanup_expired_assets(repository, storage)
     cleanup_orphaned_assets(repository, storage)
+    _emit_storage_usage_observed(storage)
     result_store = InMemoryResultReferenceStore()
     executor = LocalAnalysisExecutor(
         repository, result_store=result_store, max_concurrency=_max_concurrency()
     )
     media_adapter = FFmpegMediaAdapter(timeout_seconds=_ffmpeg_timeout_seconds())
+    coordinator = _AssetMaintenanceCoordinator()
     create_use_case = CreateAnalysisUseCase(
         repository=repository,
         asset_storage=storage,
@@ -435,8 +623,23 @@ def _build_analysis_use_cases(
         media_adapter=media_adapter,
         max_source_media_duration_seconds=_max_source_media_duration_seconds(),
         max_cue_media_duration_seconds=_max_cue_media_duration_seconds(),
+        reserve_asset_ids=coordinator.reserve,
     )
     query_use_case = QueryAnalysisUseCase(repository, result_store)
+
+    # S0011: constructed from the same repository/storage/coordinator this
+    # function just built, but not started here -- `_build_analysis_use_cases`
+    # is also called directly by several out-of-scope callers/tests that
+    # must keep observing its existing 2-tuple return shape, so the runner
+    # is handed to `create_app()` by attaching it to `create_use_case`
+    # rather than widening this function's return type.
+    create_use_case._periodic_maintenance = _PeriodicAssetMaintenance(
+        repository=repository,
+        storage=storage,
+        coordinator=coordinator,
+        interval_seconds=interval_seconds,
+    )
+
     return create_use_case, query_use_case
 
 
@@ -457,15 +660,39 @@ def create_app() -> FastAPI:
     caller (an ASGI server entry point, or a test client in a later,
     separately authorized issue) can construct a fresh instance instead of
     sharing this module's mutable `app.openapi_schema` cache.
+
+    S0011: `create_app()` alone never starts the periodic Asset-maintenance
+    worker. It only builds `_PeriodicAssetMaintenance` (inside
+    `_build_analysis_use_cases`, below) and registers `_lifespan` as this
+    `FastAPI` instance's own lifespan handler; the worker thread starts only
+    when a real ASGI server enters that lifespan (`runner.start()`) and
+    stops deterministically, via the same handler, when it exits
+    (`runner.stop()`, which signals the stop `threading.Event` and joins the
+    worker before returning). `periodic_runner` is a plain local variable
+    `_lifespan` reads via closure; it is assigned further down, before this
+    function returns and therefore strictly before any ASGI server could
+    ever invoke `_lifespan`.
     """
 
     configure_logging(level=_log_level())
+    periodic_runner: _PeriodicAssetMaintenance | None = None
+
+    @asynccontextmanager
+    async def _lifespan(_: FastAPI):
+        assert periodic_runner is not None
+        periodic_runner.start()
+        try:
+            yield
+        finally:
+            periodic_runner.stop()
+
     app = FastAPI(
         title="Audio Cue Locator API",
         version=API_VERSION,
         openapi_url=f"{API_V1_PREFIX}/openapi.json",
         docs_url=f"{API_V1_PREFIX}/docs",
         redoc_url=None,
+        lifespan=_lifespan,
     )
     install_error_handlers(app)
     asset_storage = _build_asset_storage()
@@ -476,6 +703,7 @@ def create_app() -> FastAPI:
     create_analysis_use_case, query_analysis_use_case = _build_analysis_use_cases(
         asset_storage
     )
+    periodic_runner = create_analysis_use_case._periodic_maintenance
     app.include_router(
         build_analysis_router(create_analysis_use_case, query_analysis_use_case),
         prefix=API_V1_PREFIX,

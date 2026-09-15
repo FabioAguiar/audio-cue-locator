@@ -24,6 +24,7 @@ terminal-timestamp eligibility. Both routines share the same conservative
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -72,6 +73,7 @@ def cleanup_expired_assets(
     *,
     now: datetime | None = None,
     retention_window: timedelta = MINIMUM_RETENTION_WINDOW,
+    protected_asset_ids: Collection[str] = (),
 ) -> CleanupReport:
     """Delete uniquely owned Assets for terminal, retention-eligible Analyses.
 
@@ -79,10 +81,19 @@ def cleanup_expired_assets(
     the documented seven-day minimum.  A missing stored object is reported,
     rather than treated as a successful deletion, which makes retries safe
     without concealing a broken persisted reference.
+
+    ``protected_asset_ids`` (S0011) is an optional, additive process-local
+    exclusion set: a candidate whose identifier is protected is always
+    preserved, checked both at initial candidate construction and again
+    immediately before delete, and never makes an otherwise-ineligible Asset
+    eligible. Startup callers omit it (no request can yet reserve an Asset);
+    the periodic maintenance runner supplies an immutable snapshot captured
+    while it holds the maintenance coordination boundary.
     """
 
     effective_now = now if now is not None else datetime.now(timezone.utc)
     _validate_inputs(effective_now, retention_window)
+    protected_ids = frozenset(protected_asset_ids)
 
     initial_records = _all_records(repository)
     eligible_records = tuple(
@@ -91,20 +102,26 @@ def cleanup_expired_assets(
         if _is_eligible(record, effective_now, retention_window)
     )
     references = _references_by_asset(initial_records)
+    preserved: list[str] = []
+    unprotected_candidates: list[tuple[str, str]] = []
+    for record in eligible_records:
+        for asset_id in _asset_ids(record):
+            if references[asset_id] != {record.analysis_id}:
+                continue
+            if asset_id in protected_ids:
+                preserved.append(asset_id)
+            else:
+                unprotected_candidates.append((record.analysis_id, asset_id))
     candidates = sorted(
-        (
-            (record.analysis_id, asset_id)
-            for record in eligible_records
-            for asset_id in _asset_ids(record)
-            if references[asset_id] == {record.analysis_id}
-        ),
-        key=lambda candidate: (candidate[0], candidate[1]),
+        unprotected_candidates, key=lambda candidate: (candidate[0], candidate[1])
     )
 
     deleted: list[str] = []
     missing: list[str] = []
-    preserved: list[str] = []
     for analysis_id, asset_id in candidates:
+        if asset_id in protected_ids:
+            preserved.append(asset_id)
+            continue
         current_records = _all_records(repository)
         current_by_id = {record.analysis_id: record for record in current_records}
         current_owner = current_by_id.get(analysis_id)
@@ -166,6 +183,7 @@ def cleanup_orphaned_assets(
     *,
     now: datetime | None = None,
     grace_window: timedelta = ORPHAN_UPLOAD_GRACE_WINDOW,
+    protected_asset_ids: Collection[str] = (),
 ) -> OrphanCleanupReport:
     """Delete physical Assets that no persisted Analysis has ever referenced
     and that have sat unclaimed for at least ``grace_window`` (S0012).
@@ -181,10 +199,16 @@ def cleanup_orphaned_assets(
     missing stored object is reported, rather than treated as a successful
     deletion, which makes retries safe without concealing a broken storage
     state.
+
+    ``protected_asset_ids`` (S0011): see `cleanup_expired_assets`'s own
+    docstring -- same additive, process-local, both-before-and-immediately-
+    before-delete exclusion semantics. A protected orphan candidate is
+    reported through the existing ``preserved_recent_asset_ids`` field.
     """
 
     effective_now = now if now is not None else datetime.now(timezone.utc)
     _validate_orphan_inputs(effective_now, grace_window)
+    protected_ids = frozenset(protected_asset_ids)
 
     initial_records = _all_records(repository)
     referenced_ids = set(_references_by_asset(initial_records))
@@ -197,6 +221,8 @@ def cleanup_orphaned_assets(
     for entry in entries:
         if entry.identifier in referenced_ids:
             preserved_referenced.append(entry.identifier)
+        elif entry.identifier in protected_ids:
+            preserved_recent.append(entry.identifier)
         elif _is_orphan_age_eligible(entry.stored_at, effective_now, grace_window):
             candidates.append(entry.identifier)
         else:
@@ -205,6 +231,9 @@ def cleanup_orphaned_assets(
     deleted: list[str] = []
     missing: list[str] = []
     for asset_id in sorted(candidates):
+        if asset_id in protected_ids:
+            preserved_recent.append(asset_id)
+            continue
         current_records = _all_records(repository)
         current_referenced_ids = set(_references_by_asset(current_records))
         if asset_id in current_referenced_ids:

@@ -272,6 +272,75 @@ def test_missing_bytes_are_reported_without_claiming_deletion():
     assert report.deleted_asset_ids == ()
 
 
+def test_protected_owned_candidate_is_preserved():
+    """S0011: an otherwise-deletable owned candidate passed in
+    ``protected_asset_ids`` is preserved and never reaches `storage.delete`,
+    while an unprotected eligible neighbor in the same call is still
+    deleted."""
+
+    protected_record = _record(
+        "protected-owner",
+        AnalysisLifecycleState.SUCCEEDED,
+        terminal_at=NOW - timedelta(days=8),
+    )
+    unprotected_record = _record(
+        "unprotected-owner",
+        AnalysisLifecycleState.SUCCEEDED,
+        terminal_at=NOW - timedelta(days=8),
+    )
+    all_asset_ids = {
+        protected_record.source_asset_id,
+        protected_record.cues[0].asset_id,
+        unprotected_record.source_asset_id,
+        unprotected_record.cues[0].asset_id,
+    }
+    storage = _Storage(all_asset_ids)
+
+    report = cleanup_expired_assets(
+        _Repository((protected_record, unprotected_record)),
+        storage,
+        now=NOW,
+        protected_asset_ids={
+            protected_record.source_asset_id,
+            protected_record.cues[0].asset_id,
+        },
+    )
+
+    assert protected_record.source_asset_id not in storage.delete_calls
+    assert protected_record.cues[0].asset_id not in storage.delete_calls
+    assert protected_record.source_asset_id in storage.existing
+    assert protected_record.cues[0].asset_id in storage.existing
+    assert set(report.preserved_asset_ids) == {
+        protected_record.source_asset_id,
+        protected_record.cues[0].asset_id,
+    }
+    assert set(report.deleted_asset_ids) == {
+        unprotected_record.source_asset_id,
+        unprotected_record.cues[0].asset_id,
+    }
+
+
+def test_default_protected_asset_ids_preserves_historical_owned_cleanup_behavior():
+    """Omitting ``protected_asset_ids`` reproduces pre-S0011 behavior
+    exactly (same assertions as
+    `test_exact_seven_day_boundary_deletes_all_uniquely_owned_assets`)."""
+
+    owned_asset_id = _asset_id()
+    record = _record(
+        "eligible",
+        AnalysisLifecycleState.SUCCEEDED,
+        owned_asset_ids=(owned_asset_id,),
+        terminal_at=NOW - MINIMUM_RETENTION_WINDOW,
+    )
+    asset_ids = {record.source_asset_id, record.cues[0].asset_id, owned_asset_id}
+    storage = _Storage(asset_ids)
+
+    report = cleanup_expired_assets(_Repository((record,)), storage, now=NOW)
+
+    assert set(report.deleted_asset_ids) == asset_ids
+    assert storage.existing == set()
+
+
 def test_retention_window_cannot_be_shorter_than_seven_days():
     with pytest.raises(InvalidRetentionPolicyError):
         cleanup_expired_assets(
@@ -549,6 +618,40 @@ def test_multiple_old_orphans_produce_a_deterministic_deletion_report():
     report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
 
     assert report.deleted_asset_ids == (first, second)
+
+
+def test_protected_orphan_candidate_is_preserved():
+    """S0011: an otherwise-deletable orphan candidate passed in
+    ``protected_asset_ids`` is preserved (reported through the existing
+    ``preserved_recent_asset_ids`` field) and never reaches `storage.delete`,
+    while an unprotected eligible neighbor in the same call is still
+    deleted."""
+
+    protected_id, unprotected_id = sorted((_asset_id(), _asset_id()))
+    old = NOW - timedelta(hours=48)
+    storage = _OrphanStorage(
+        (_entry(protected_id, stored_at=old), _entry(unprotected_id, stored_at=old))
+    )
+
+    report = cleanup_orphaned_assets(
+        _Repository(()), storage, now=NOW, protected_asset_ids={protected_id}
+    )
+
+    assert protected_id not in storage.delete_calls
+    assert protected_id in report.preserved_recent_asset_ids
+    assert report.deleted_asset_ids == (unprotected_id,)
+
+
+def test_default_protected_asset_ids_preserves_historical_orphan_cleanup_behavior():
+    """Omitting ``protected_asset_ids`` reproduces pre-S0011 behavior
+    exactly (same assertion as `test_old_unreferenced_asset_is_deleted`)."""
+
+    asset_id = _asset_id()
+    storage = _OrphanStorage((_entry(asset_id, stored_at=NOW - timedelta(hours=25)),))
+
+    report = cleanup_orphaned_assets(_Repository(()), storage, now=NOW)
+
+    assert report.deleted_asset_ids == (asset_id,)
 
 
 def test_storage_delete_false_is_reported_without_claiming_deletion():

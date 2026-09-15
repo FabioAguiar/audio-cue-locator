@@ -16,6 +16,7 @@ conventions where consistent.
 
 from __future__ import annotations
 
+import importlib
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,8 +34,12 @@ from audio_cue_locator.core.analysis_result import (
     NormalizationSnapshot,
     StructuredError,
 )
+from audio_cue_locator.core.asset import AssetType
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
     SQLiteAnalysisRepository,
+)
+from audio_cue_locator.infrastructure.asset_storage.local_filesystem_storage import (
+    LocalFilesystemAssetStorage,
 )
 from audio_cue_locator.infrastructure.asset_storage.retention_policy import (
     cleanup_expired_assets,
@@ -50,6 +55,8 @@ from audio_cue_locator.interfaces.rest_api.schemas import (
 )
 from audio_cue_locator.observability import VALID_BOUNDARIES, VALID_OUTCOMES
 from audio_cue_locator.observability.events import LOGGER_NAME, emit_diagnostic_event
+
+app_module = importlib.import_module("audio_cue_locator.interfaces.rest_api.app")
 
 QUEUED_AT = datetime(2026, 1, 1, tzinfo=timezone.utc)
 RUNNING_AT = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -192,6 +199,7 @@ def test_emitted_event_payload_has_exactly_the_documented_fields(
         "correlation_id",
         "duration_ms",
         "count",
+        "size_bytes",
         "timestamp",
     }
     assert payload["event"] == "unit_test_event"
@@ -436,6 +444,118 @@ def test_orphan_cleanup_pass_emits_one_count_only_event(
     assert orphan_events[0]["analysis_id"] is None
 
 
+# --- S0011: size_bytes schema and storage-usage/maintenance-failure events --
+
+
+def test_size_bytes_accepts_non_negative_integer(caplog: pytest.LogCaptureFixture):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        emit_diagnostic_event(
+            event="unit_test_event", boundary="api", outcome="succeeded", size_bytes=0
+        )
+    events = _acl_events(caplog)
+    assert events[-1]["size_bytes"] == 0
+
+
+def test_size_bytes_rejects_negative_value():
+    with pytest.raises(ValueError):
+        emit_diagnostic_event(
+            event="x", boundary="api", outcome="succeeded", size_bytes=-1
+        )
+
+
+def test_size_bytes_rejects_bool():
+    with pytest.raises(ValueError):
+        emit_diagnostic_event(
+            event="x", boundary="api", outcome="succeeded", size_bytes=True
+        )
+
+
+def test_asset_storage_usage_observed_reports_aggregate_count_and_bytes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """S0011 acceptance 10.10: three managed entries of known sizes produce
+    one aggregate count/size_bytes observation -- never a per-Asset size or
+    identifier."""
+
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    storage.ingest(
+        b"a" * 100,
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="a.wav",
+        detected_media_type="audio/wav",
+    )
+    storage.ingest(
+        b"b" * 250,
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="b.wav",
+        detected_media_type="audio/wav",
+    )
+    storage.ingest(
+        b"c" * 650,
+        logical_type=AssetType.SOURCE_MEDIA,
+        informative_name="c.wav",
+        detected_media_type="audio/wav",
+    )
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        app_module._emit_storage_usage_observed(storage)
+
+    events = _acl_events(caplog)
+    usage_events = [e for e in events if e["event"] == "asset_storage_usage_observed"]
+    assert len(usage_events) == 1
+    event = usage_events[0]
+    assert event["boundary"] == "cleanup"
+    assert event["outcome"] == "succeeded"
+    assert event["count"] == 3
+    assert event["size_bytes"] == 1000
+    assert event["analysis_id"] is None
+
+
+def test_asset_maintenance_cycle_failed_is_sanitized(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
+    """A periodic cycle exception emits only a sanitized exception-class
+    `category` -- never the raw exception message -- and the cycle returns
+    normally (no re-raise) so the worker's wait loop can retry later."""
+
+    class _RaisingRepository:
+        def list_by_state(self, state):
+            return ()
+
+    storage = LocalFilesystemAssetStorage(tmp_path / "assets")
+    coordinator = app_module._AssetMaintenanceCoordinator()
+    raw_message = "a secret-looking /var/data/leak.wav failure detail"
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError(raw_message)
+
+    monkeypatch.setattr(app_module, "cleanup_expired_assets", _raise)
+    runner = app_module._PeriodicAssetMaintenance(
+        repository=_RaisingRepository(),
+        storage=storage,
+        coordinator=coordinator,
+        interval_seconds=3600.0,
+    )
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        runner._run_one_cycle()
+
+    events = _acl_events(caplog)
+    failure_events = [
+        e for e in events if e["event"] == "asset_maintenance_cycle_failed"
+    ]
+    assert len(failure_events) == 1
+    assert failure_events[0]["boundary"] == "cleanup"
+    assert failure_events[0]["outcome"] == "failed"
+    assert failure_events[0]["category"] == "RuntimeError"
+    for record in caplog.records:
+        assert raw_message not in record.getMessage()
+        payload = getattr(record, "audio_cue_locator_event", {})
+        for value in payload.values():
+            if isinstance(value, str):
+                assert raw_message not in value
+
+
 # --- data minimization: no captured event leaks a path, payload, or secret --
 
 
@@ -447,6 +567,8 @@ def test_orphan_cleanup_pass_emits_one_count_only_event(
         ("persistence", "analysis_persistence_write_failed"),
         ("cleanup", "asset_retention_cleanup_completed"),
         ("cleanup", "asset_orphan_cleanup_completed"),
+        ("cleanup", "asset_storage_usage_observed"),
+        ("cleanup", "asset_maintenance_cycle_failed"),
         ("api", "api_request_failed"),
     ],
 )

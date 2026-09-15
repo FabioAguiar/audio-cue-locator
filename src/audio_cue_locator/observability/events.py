@@ -36,6 +36,10 @@ open-ended mapping a caller could add arbitrary keys to:
   introduces a second, independent timing mechanism.
 - ``count``: an optional non-identifying magnitude (for example how many
   Assets one cleanup pass deleted) -- never a list of identifiers.
+- ``size_bytes``: an optional non-negative integer magnitude (S0011; for
+  example the total bytes of every currently managed Asset). Like ``count``,
+  this is an aggregate: never a per-Asset size, and never paired with any
+  Asset identifier or path.
 
 No field here ever carries a filename, a submitted-file path, media bytes,
 a raw payload, a secret, or a raw exception message: this fixed field set
@@ -121,23 +125,30 @@ def emit_diagnostic_event(
     correlation_id: str | None = None,
     duration_ms: float | None = None,
     count: int | None = None,
+    size_bytes: int | None = None,
 ) -> None:
     """Emit exactly one structured diagnostic event through `LOGGER_NAME`.
 
-    Raises `ValueError` if `boundary` is not one of `VALID_BOUNDARIES` or
-    `outcome` is not one of `VALID_OUTCOMES`, rather than silently logging
-    an inconsistent event. The human-readable log message is `event`
-    itself; every other field is attached to the emitted `LogRecord` as
-    `record.audio_cue_locator_event` (a single structured payload, not
-    individual free-standing attributes), so a caller with `caplog` or an
-    equivalent capture mechanism can assert on the full structured payload
-    without parsing a formatted string.
+    Raises `ValueError` if `boundary` is not one of `VALID_BOUNDARIES`,
+    `outcome` is not one of `VALID_OUTCOMES`, or `size_bytes` is not a
+    non-negative integer (bools rejected; S0011), rather than silently
+    logging an inconsistent event. The human-readable log message is
+    `event` itself; every other field is attached to the emitted
+    `LogRecord` as `record.audio_cue_locator_event` (a single structured
+    payload, not individual free-standing attributes), so a caller with
+    `caplog` or an equivalent capture mechanism can assert on the full
+    structured payload without parsing a formatted string.
     """
 
     if boundary not in VALID_BOUNDARIES:
         raise ValueError(f"unknown observability boundary: {boundary!r}")
     if outcome not in VALID_OUTCOMES:
         raise ValueError(f"unknown observability outcome: {outcome!r}")
+    if size_bytes is not None:
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+            raise ValueError("size_bytes must be a non-negative integer or None")
+        if size_bytes < 0:
+            raise ValueError("size_bytes must be a non-negative integer")
 
     payload = {
         "event": event,
@@ -148,6 +159,7 @@ def emit_diagnostic_event(
         "correlation_id": correlation_id,
         "duration_ms": duration_ms,
         "count": count,
+        "size_bytes": size_bytes,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     level = _SUCCEEDED_LOG_LEVEL if outcome == "succeeded" else _FAILED_LOG_LEVEL

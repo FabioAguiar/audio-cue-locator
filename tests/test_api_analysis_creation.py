@@ -32,6 +32,7 @@ import struct
 import time
 import wave
 from concurrent.futures import Future
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,7 @@ from audio_cue_locator.application.create_analysis import (
     MAX_CUE_LABEL_CODEPOINTS,
     AssetCanonicalizationError,
     AssetContentIncompatibleError,
+    CreateAnalysisUseCase,
     CueRequest,
     InvalidCueRequestError,
     InvalidSimilarityScoreError,
@@ -220,7 +222,16 @@ def use_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setenv("AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT", str(tmp_path / "assets"))
     storage = _build_asset_storage()
-    return _build_create_analysis_use_case(storage)
+    built = _build_create_analysis_use_case(storage)
+    try:
+        yield built
+    finally:
+        # Shut down this fixture's own `LocalAnalysisExecutor` worker pool so
+        # no background thread from one test can still be running -- and
+        # possibly still logging -- once a later test's own capture context
+        # has already closed (observed as a spurious "I/O operation on
+        # closed file" logging error without this teardown).
+        built._executor.shutdown()
 
 
 @pytest.fixture()
@@ -1098,3 +1109,184 @@ def test_real_media_canonicalization_failure_still_emits_media_canonicalization_
     assert media_events[0]["outcome"] == "failed"
     assert media_events[0]["category"] == "AssetCanonicalizationError"
     assert not any(event["event"] == "cue_validation_failed" for event in events)
+
+
+# --- S0011: Asset-reservation boundary ---------------------------------------
+
+
+class _RecordingReservation:
+    """A deterministic, in-process fake `ReserveAssetIdsFn` (S0011): records
+    every reservation call's deduplicated asset-id tuple and how many
+    reservations are currently active/entered, with no real threading or
+    locking involved -- these are focused Application tests, not coordinator
+    concurrency tests (`tests/operational/test_retention_cleanup.py` covers
+    the real `_AssetMaintenanceCoordinator`)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.active = 0
+
+    @contextmanager
+    def __call__(self, asset_ids):
+        ids = tuple(asset_ids)
+        self.calls.append(ids)
+        self.active += 1
+        try:
+            yield
+        finally:
+            self.active -= 1
+
+
+def _reserving_use_case(
+    use_case, reservation: _RecordingReservation
+) -> CreateAnalysisUseCase:
+    """A second `CreateAnalysisUseCase` sharing every real collaborator the
+    `use_case` fixture already built (repository, Asset storage, executor,
+    media adapter, limits), except with `reservation` injected as
+    `reserve_asset_ids` in place of the production no-op default."""
+
+    return CreateAnalysisUseCase(
+        repository=use_case._repository,
+        asset_storage=use_case._asset_storage,
+        executor=use_case._executor,
+        max_cue_count=use_case._max_cue_count,
+        media_adapter=use_case._media_adapter,
+        max_source_media_duration_seconds=use_case._max_source_media_duration_seconds,
+        max_cue_media_duration_seconds=use_case._max_cue_media_duration_seconds,
+        reserve_asset_ids=reservation,
+    )
+
+
+def test_reservation_entered_before_first_storage_read(
+    use_case, source_asset_id, cue_asset_id, monkeypatch: pytest.MonkeyPatch
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    real_read = reserving_use_case._asset_storage.read
+    read_calls: list[int] = []
+
+    def _recording_read(asset_id: str) -> bytes:
+        read_calls.append(reservation.active)
+        return real_read(asset_id)
+
+    monkeypatch.setattr(reserving_use_case._asset_storage, "read", _recording_read)
+
+    reserving_use_case.create(
+        source_asset_id=source_asset_id,
+        cues=[CueRequest(cue_id="cue-1", asset_id=cue_asset_id)],
+    )
+
+    assert read_calls  # at least the source's physical read happened
+    assert all(active_count >= 1 for active_count in read_calls)
+
+
+def test_reservation_set_contains_source_and_deduplicated_cue_ids(
+    use_case, source_asset_id, cue_asset_id
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    reserving_use_case.create(
+        source_asset_id=source_asset_id,
+        cues=[
+            CueRequest(cue_id="cue-1", asset_id=cue_asset_id),
+            CueRequest(cue_id="cue-2", asset_id=source_asset_id),  # reuses source id
+        ],
+    )
+
+    assert len(reservation.calls) == 1
+    assert reservation.calls[0] == (source_asset_id, cue_asset_id)
+
+
+def test_duplicate_cue_asset_ids_collapse_to_one_reservation_entry(
+    use_case, source_asset_id, cue_asset_id
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    reserving_use_case.create(
+        source_asset_id=source_asset_id,
+        cues=[
+            CueRequest(cue_id="cue-1", asset_id=cue_asset_id),
+            CueRequest(cue_id="cue-2", asset_id=cue_asset_id),  # same Asset, twice
+        ],
+    )
+
+    assert reservation.calls[0] == (source_asset_id, cue_asset_id)
+    assert reservation.calls[0].count(cue_asset_id) == 1
+
+
+def test_reservation_remains_active_through_repository_create(
+    use_case, source_asset_id, cue_asset_id, monkeypatch: pytest.MonkeyPatch
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    real_create = reserving_use_case._repository.create
+    active_during_create: list[int] = []
+
+    def _recording_create(**kwargs):
+        active_during_create.append(reservation.active)
+        return real_create(**kwargs)
+
+    monkeypatch.setattr(reserving_use_case._repository, "create", _recording_create)
+
+    reserving_use_case.create(
+        source_asset_id=source_asset_id,
+        cues=[CueRequest(cue_id="cue-1", asset_id=cue_asset_id)],
+    )
+
+    assert active_during_create == [1]
+
+
+def test_reservation_releases_after_successful_creation(
+    use_case, source_asset_id, cue_asset_id
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    reserving_use_case.create(
+        source_asset_id=source_asset_id,
+        cues=[CueRequest(cue_id="cue-1", asset_id=cue_asset_id)],
+    )
+
+    assert reservation.active == 0
+    assert len(reservation.calls) == 1
+
+
+def test_reservation_releases_after_source_validation_failure(
+    use_case, cue_asset_id
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    with pytest.raises(AssetNotFoundError):
+        reserving_use_case.create(
+            source_asset_id="00000000-0000-4000-8000-000000000000",
+            cues=[CueRequest(cue_id="cue-1", asset_id=cue_asset_id)],
+        )
+
+    assert reservation.active == 0
+    assert len(reservation.calls) == 1
+
+
+def test_reservation_releases_after_cue_validation_failure(
+    use_case, source_asset_id
+):
+    reservation = _RecordingReservation()
+    reserving_use_case = _reserving_use_case(use_case, reservation)
+
+    with pytest.raises(AssetNotFoundError):
+        reserving_use_case.create(
+            source_asset_id=source_asset_id,
+            cues=[
+                CueRequest(
+                    cue_id="cue-1",
+                    asset_id="00000000-0000-4000-8000-000000000000",
+                )
+            ],
+        )
+
+    assert reservation.active == 0
+    assert len(reservation.calls) == 1
