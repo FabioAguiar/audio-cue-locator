@@ -18,11 +18,19 @@ placeholder scaffold. From `/`, a user can:
 - select a supported source-media file (by click or drag/drop);
 - add one or more WAV cues, each with optional Name/Start time/End time
   (S0003 `label`/`trim_start_seconds`/`trim_end_seconds`);
-- create an Analysis and watch its lifecycle (`Creating…` / `Analyzing…`)
-  without a separate status panel;
+- create an Analysis with truthful presentation phases (`Uploading…` while
+  source/Cue Assets are sent, then `Locating…` while Analysis creation and
+  queued/running processing are active) without a separate status panel;
 - review Results -- occurrences, `no_match`, cue-level failures, and
   Analysis-level failures -- as soon as they are available, and download
   the byte-identical Result JSON.
+
+The Uploading and Locating phases are presentation-only mappings to real
+network and persisted lifecycle boundaries; they are not backend Analysis
+statuses and do not measure progress. Their compact audio-bar artwork is
+indeterminate. With `prefers-reduced-motion: reduce`, continuous bar and
+magnifier movement is disabled while the static themed artwork and semantic
+phase text remain visible.
 
 ### Cue Start/End: Cue-local bounds, not source-media bounds (S0005)
 

@@ -139,6 +139,28 @@ host-path details are absent from the message, and verifies that the UI renders
 those public fields without internal detail. It also verifies that no Analysis
 creation request follows the rejected upload.
 
+### Uploading and Locating activity feedback (S0006)
+
+The shared real-submission helper synchronizes with the actual source Asset
+upload and Analysis-creation request boundaries. It observes the CTA and
+semantic activity region transition from **Uploading…** / **Uploading
+media…** to **Locating…** / **Locating cues…**, then observes the Locating
+indicator in the Results loading area after the server supplies an Analysis
+ID. The test does not intercept, fulfill, delay, or mock requests to expose
+these transient phases.
+
+Successful Result scenarios assert that no S0006 activity indicator remains
+after terminal completion. The real rejected-media scenario asserts that the
+Uploading indicator is removed and the idle CTA is restored after the upload
+error. Assertions also prove the former `Creating…` and `Analyzing…` wait
+copy is absent.
+
+The existing large real Asset-upload scenario emulates
+`prefers-reduced-motion: reduce` and verifies during the active Uploading
+boundary that semantic phase content remains observable, the decorative bar
+artwork remains present, and its computed `animation-name` is `none`. This is
+a static fallback check, not measured upload progress.
+
 ## M6 minimum-evidence checklist
 
 The statuses below accurately describe this implementation phase. They must not
@@ -157,6 +179,12 @@ be changed to “passed” without an authorized real-backend execution.
 | WebM + blank Cue trims (S0005) | `video/webm` detected, `trim_start_seconds`/`trim_end_seconds` serialize as `null`, `/analyses` explicitly `202` before parsing, terminal Results reached | Not executed in this phase |
 | Duration-relative invalid trim (S0005) | Real `400 validation_error`, existing Error notice preserved, safe conditional trim advisory shown, no fabricated Result | Not executed in this phase |
 | Blank-trim `validation_error` shows no trim advisory (S0005) | Real unrelated `400 validation_error` with blank Start/End does not trigger the trim-specific advisory | Not executed in this phase |
+| Uploading activity (S0006) | CTA/activity observed at the real source Asset-upload boundary | Not executed in this phase |
+| Pre-ID Locating activity (S0006) | CTA/Cues activity observed when the real `POST /api/v1/analyses` begins | Not executed in this phase |
+| Post-ID Locating activity (S0006) | Results loading activity observed after the real `202` supplies `analysis_id` | Not executed in this phase |
+| Terminal/error activity stop (S0006) | No active activity remains after terminal Result or rejected source upload | Not executed in this phase |
+| Stale wait copy absent (S0006) | No user-facing `Creating…` or `Analyzing…` during the real flow | Not executed in this phase |
+| Reduced-motion fallback (S0006) | Semantic Uploading status and static artwork remain while computed continuous animation is disabled | Not executed in this phase |
 
 ## Test-phase recording requirements
 

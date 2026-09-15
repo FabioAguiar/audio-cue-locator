@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { AnalysisPublic, ApiNetworkError, ErrorPublic } from "../api/client";
+import ActivityIndicator from "../components/ActivityIndicator";
 import {
   AnalysisResultEnvelope,
   CueResult,
@@ -269,11 +270,7 @@ export default function ResultPage({
       );
     }
 
-    if (!analysis || isPolling) {
-      return <p className="results-loading">Analyzing…</p>;
-    }
-
-    if (analysis.status === "failed") {
+    if (analysis?.status === "failed") {
       return (
         <div className="analysis-failed-notice" role="alert">
           <h3>Analysis failed</h3>
@@ -287,69 +284,84 @@ export default function ResultPage({
       );
     }
 
-    // analysis.status === "succeeded" from here on.
-    if (resultState.status === "not_requested" || resultState.status === "loading") {
-      return <p className="results-loading">Loading Analysis result…</p>;
-    }
+    if (analysis?.status === "succeeded") {
+      if (
+        resultState.status === "not_requested" ||
+        resultState.status === "loading"
+      ) {
+        return <p className="results-loading">Loading Analysis result…</p>;
+      }
 
-    if (resultState.status === "network_error") {
+      if (resultState.status === "network_error") {
+        return (
+          <p role="alert" className="form-alert">
+            Unable to reach the server to load this Analysis result.
+          </p>
+        );
+      }
+
+      if (resultState.status === "api_error") {
+        return (
+          <ApiErrorNotice
+            heading="Unable to load Analysis result"
+            error={resultState.error}
+          />
+        );
+      }
+
+      const { envelope, rawText } = resultState;
+      const matchCount = totalOccurrenceCount(envelope);
+
       return (
-        <p role="alert" className="form-alert">
-          Unable to reach the server to load this Analysis result.
-        </p>
+        <>
+          <div className="match-badge">
+            <span aria-hidden="true">✓</span>
+            <strong>{matchCountLabel(matchCount)}</strong>
+          </div>
+          <ul className="results-list">
+            {envelope.result.cues.map((cue, index) => (
+              <CueOutcomeItem
+                key={cue.cue_id}
+                cue={cue}
+                index={index}
+                cueFilenamesById={cueFilenamesById}
+                cueLabelsById={cueLabelsById}
+              />
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="download-button"
+            onClick={() =>
+              downloadAnalysisResultText(analysis.analysis_id, rawText)
+            }
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4h14v-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Download result JSON
+          </button>
+        </>
       );
     }
 
-    if (resultState.status === "api_error") {
-      return (
-        <ApiErrorNotice
-          heading="Unable to load Analysis result"
-          error={resultState.error}
-        />
-      );
+    if (
+      !analysis ||
+      isPolling ||
+      analysis.status === "queued" ||
+      analysis.status === "running"
+    ) {
+      return <ActivityIndicator phase="locating" />;
     }
 
-    const { envelope, rawText } = resultState;
-    const matchCount = totalOccurrenceCount(envelope);
-
-    return (
-      <>
-        <div className="match-badge">
-          <span aria-hidden="true">✓</span>
-          <strong>{matchCountLabel(matchCount)}</strong>
-        </div>
-        <ul className="results-list">
-          {envelope.result.cues.map((cue, index) => (
-            <CueOutcomeItem
-              key={cue.cue_id}
-              cue={cue}
-              index={index}
-              cueFilenamesById={cueFilenamesById}
-              cueLabelsById={cueLabelsById}
-            />
-          ))}
-        </ul>
-        <button
-          type="button"
-          className="download-button"
-          onClick={() =>
-            downloadAnalysisResultText(analysis.analysis_id, rawText)
-          }
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M12 3v11m0 0 4-4m-4 4-4-4M5 15v4h14v-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          Download result JSON
-        </button>
-      </>
-    );
+    return <ActivityIndicator phase="locating" />;
   }
 
   return (

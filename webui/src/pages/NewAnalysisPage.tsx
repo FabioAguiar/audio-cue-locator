@@ -8,6 +8,9 @@ import {
   uploadCue,
   uploadSourceMedia,
 } from "../api/client";
+import ActivityIndicator, {
+  type ActivityPhase,
+} from "../components/ActivityIndicator";
 import { useAnalysisPolling } from "../hooks/useAnalysisPolling";
 import ResultPage from "./ResultPage";
 
@@ -41,6 +44,8 @@ interface CueFileEntry {
   startText: string;
   endText: string;
 }
+
+type SubmissionPhase = "idle" | ActivityPhase;
 
 let nextCueKey = 1;
 
@@ -121,6 +126,8 @@ export default function NewAnalysisPage(): JSX.Element {
     newCueFileEntry(),
   ]);
   const [submitting, setSubmitting] = useState(false);
+  const [submissionPhase, setSubmissionPhase] =
+    useState<SubmissionPhase>("idle");
   const [submitError, setSubmitError] = useState<ErrorPublic | null>(null);
   const [submitNetworkErrorMessage, setSubmitNetworkErrorMessage] = useState<
     string | null
@@ -225,6 +232,7 @@ export default function NewAnalysisPage(): JSX.Element {
     }
 
     setSubmitting(true);
+    setSubmissionPhase("uploading");
     setSubmitError(null);
     setSubmitNetworkErrorMessage(null);
     setTrimAdvisoryVisible(false);
@@ -264,6 +272,7 @@ export default function NewAnalysisPage(): JSX.Element {
         filenamesById[cueId] = (entry.file as File).name;
       }
 
+      setSubmissionPhase("locating");
       const analysisCreation = await createAnalysis(
         sourceUpload.data.identifier,
         cues,
@@ -293,14 +302,17 @@ export default function NewAnalysisPage(): JSX.Element {
       throw cause;
     } finally {
       setSubmitting(false);
+      setSubmissionPhase("idle");
     }
   }
 
   let lifecycleLabel = "Create Analysis";
-  if (submitting) {
-    lifecycleLabel = "Creating…";
+  if (!analysisActive && submissionPhase === "uploading") {
+    lifecycleLabel = "Uploading…";
+  } else if (!analysisActive && submissionPhase === "locating") {
+    lifecycleLabel = "Locating…";
   } else if (analysisActive && !isTerminal) {
-    lifecycleLabel = "Analyzing…";
+    lifecycleLabel = "Locating…";
   }
 
   return (
@@ -578,9 +590,9 @@ export default function NewAnalysisPage(): JSX.Element {
               </svg>
               <span>{lifecycleLabel}</span>
             </button>
-            <p className="lifecycle-note" aria-live="polite">
-              {analysisActive && !isTerminal ? lifecycleLabel : ""}
-            </p>
+            {!analysisActive && submissionPhase !== "idle" && (
+              <ActivityIndicator phase={submissionPhase} />
+            )}
           </div>
         </form>
 

@@ -275,6 +275,11 @@ async function submitAnalysis(
   const createButton = page.getByRole("button", { name: "Create Analysis" });
   await expect(createButton).toBeEnabled();
 
+  const sourceUploadRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/v1/assets/source-media",
+  );
   const analysesRequestPromise = page.waitForRequest(
     (request) =>
       request.method() === "POST" &&
@@ -286,9 +291,29 @@ async function submitAnalysis(
       new URL(response.url()).pathname === "/api/v1/analyses",
     { timeout: analysisTimeoutMs },
   );
+  const uploadingButtonPromise = page
+    .getByRole("button", { name: "Uploading…" })
+    .waitFor({ state: "visible" });
+  const uploadingActivityPromise = page
+    .locator('.cues-panel [data-activity-phase="uploading"]')
+    .waitFor({ state: "visible" });
+  const locatingButtonPromise = page
+    .getByRole("button", { name: "Locating…" })
+    .waitFor({ state: "visible", timeout: analysisTimeoutMs });
+  const preIdLocatingActivityPromise = page
+    .locator('.cues-panel [data-activity-phase="locating"]')
+    .waitFor({ state: "visible", timeout: analysisTimeoutMs });
+  const postIdLocatingActivityPromise = page
+    .locator('.results-panel [data-activity-phase="locating"]')
+    .waitFor({ state: "visible", timeout: analysisTimeoutMs });
   await createButton.click();
 
+  await sourceUploadRequestPromise;
+  await Promise.all([uploadingButtonPromise, uploadingActivityPromise]);
   const analysesRequest = await analysesRequestPromise;
+  await Promise.all([locatingButtonPromise, preIdLocatingActivityPromise]);
+  await expect(page.getByText("Creating…", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Analyzing…", { exact: true })).toHaveCount(0);
   const requestBody = analysesRequest.postDataJSON() as {
     cues: AnalysisCueRequestBody[];
   };
@@ -305,6 +330,7 @@ async function submitAnalysis(
   await expect(page.getByRole("heading", { name: "Results" })).toBeVisible({
     timeout: analysisTimeoutMs,
   });
+  await postIdLocatingActivityPromise;
   await expect(page.getByText(/^Status: /)).toHaveCount(0);
 
   return { analysisId: analysis.analysis_id, requestCues: requestBody.cues };
@@ -456,6 +482,9 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
 
     const downloadButton = page.getByRole("button", { name: "Download result JSON" });
     await expect(downloadButton).toBeVisible({ timeout: analysisTimeoutMs });
+    await expect(page.locator("[data-activity-phase]")).toHaveCount(0);
+    await expect(page.getByText("Creating…", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Analyzing…", { exact: true })).toHaveCount(0);
 
     // Raw scores are never presented as confidence or a percentage.
     const resultsText = (await page.locator(".results-panel").innerText()).toLowerCase();
@@ -582,6 +611,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     const baseUrl = webuiBaseUrl();
     const fixtures = fixturePaths();
     const calls = beginPublicApiAudit(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
 
     // Nginx's own historical default (`client_max_body_size 1m`, unset in
     // the pre-S0001 embedded config) is 1,048,576 bytes. 2 MiB clears that
@@ -605,8 +635,31 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
         new URL(response.url()).pathname === "/api/v1/assets/source-media",
       { timeout: analysisTimeoutMs },
     );
+    const uploadingStatusPromise = page
+      .locator('.cues-panel [data-activity-phase="uploading"]', {
+        hasText: "Uploading media…",
+      })
+      .waitFor({ state: "visible" });
+    const staticReducedMotionArtworkPromise = page.waitForFunction(() => {
+      const bar = document.querySelector(
+        '.acl-activity--uploading .acl-activity__bar',
+      );
+      const visual = document.querySelector(
+        '.acl-activity--uploading .acl-activity__visual',
+      );
+      return (
+        bar instanceof HTMLElement &&
+        visual instanceof HTMLElement &&
+        getComputedStyle(bar).animationName === "none" &&
+        visual.getBoundingClientRect().width > 0
+      );
+    });
     await page.getByRole("button", { name: "Create Analysis" }).click();
 
+    await Promise.all([
+      uploadingStatusPromise,
+      staticReducedMotionArtworkPromise,
+    ]);
     const sourceMediaResponse = await sourceMediaResponsePromise;
 
     // A proxy-generated rejection would be a 413 from Nginx itself, before
@@ -674,6 +727,8 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(page.getByRole("alert")).toHaveText(
       `${error.message} (error_code: ${error.error_code}, correlation_id: ${error.correlation_id})`,
     );
+    await expect(page.locator("[data-activity-phase]")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Create Analysis" })).toBeVisible();
     expect(countCalls(calls, "POST", /^\/api\/v1\/analyses$/)).toBe(0);
     assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
   });
@@ -726,6 +781,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(
       page.getByRole("button", { name: "Download result JSON" }),
     ).toBeVisible({ timeout: analysisTimeoutMs });
+    await expect(page.locator("[data-activity-phase]")).toHaveCount(0);
 
     assertOnlyDocumentedPublicApiCalls(calls, baseUrl);
     expect(

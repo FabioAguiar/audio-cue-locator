@@ -583,15 +583,6 @@ input:disabled {
   cursor: not-allowed;
   transform: none;
 }
-.lifecycle-note {
-  min-height: 15px;
-  margin: 0;
-  color: var(--muted);
-  text-align: center;
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
 .form-alert {
   margin-top: 10px;
   padding: 10px 14px;
@@ -600,6 +591,184 @@ input:disabled {
   color: var(--error);
   font-size: 0.8rem;
   line-height: 1.4;
+}
+
+/* ------------------------------------------------------------------ */
+/* Uploading / locating activity                                       */
+/* ------------------------------------------------------------------ */
+
+.acl-activity {
+  width: min(100%, 280px);
+  margin: 2px auto 0;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  color: var(--navy);
+}
+.acl-activity__visual {
+  position: relative;
+  width: min(100%, 240px);
+  height: 54px;
+  overflow: hidden;
+}
+.acl-activity__bars {
+  position: absolute;
+  inset-inline: 6px;
+  bottom: 4px;
+  height: 34px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: clamp(3px, 2.2vw, 7px);
+}
+.acl-activity--uploading .acl-activity__bars {
+  inset-inline: 44px 8px;
+}
+.acl-activity__bar {
+  width: clamp(7px, 3.2vw, 11px);
+  height: 58%;
+  flex: 1 1 8px;
+  max-width: 11px;
+  border-radius: 999px;
+  background: var(--purple);
+  transform-origin: center bottom;
+}
+.acl-activity__bar:nth-child(2),
+.acl-activity__bar:nth-child(7) {
+  height: 88%;
+  background: var(--pink);
+}
+.acl-activity__bar:nth-child(3),
+.acl-activity__bar:nth-child(8) {
+  height: 46%;
+  background: var(--cyan);
+}
+.acl-activity__bar:nth-child(4),
+.acl-activity__bar:nth-child(9) {
+  height: 100%;
+  background: var(--blue);
+}
+.acl-activity__bar:nth-child(5),
+.acl-activity__bar:nth-child(10) {
+  height: 70%;
+  background: var(--purple-2);
+}
+.acl-activity--uploading .acl-activity__bar {
+  animation: acl-upload-pulse 1.45s ease-in-out infinite;
+}
+.acl-activity--uploading .acl-activity__bar:nth-child(2),
+.acl-activity--uploading .acl-activity__bar:nth-child(7) {
+  animation-delay: -1.16s;
+}
+.acl-activity--uploading .acl-activity__bar:nth-child(3),
+.acl-activity--uploading .acl-activity__bar:nth-child(8) {
+  animation-delay: -0.87s;
+}
+.acl-activity--uploading .acl-activity__bar:nth-child(4),
+.acl-activity--uploading .acl-activity__bar:nth-child(9) {
+  animation-delay: -0.58s;
+}
+.acl-activity--uploading .acl-activity__bar:nth-child(5),
+.acl-activity--uploading .acl-activity__bar:nth-child(10) {
+  animation-delay: -0.29s;
+}
+.acl-activity__upload-glyph,
+.acl-activity__scanner {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  color: var(--purple);
+  filter: drop-shadow(0 4px 6px rgba(85, 65, 194, 0.2));
+}
+.acl-activity__upload-glyph {
+  inset-inline-start: 5px;
+  top: 10px;
+}
+.acl-activity__upload-glyph rect {
+  fill: color-mix(in srgb, var(--cyan) 24%, white);
+  stroke: currentColor;
+  stroke-width: 2;
+}
+.acl-activity__upload-glyph path,
+.acl-activity__scanner circle,
+.acl-activity__scanner path {
+  fill: white;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.acl-activity__scanner {
+  left: 4px;
+  top: 0;
+  color: #7144e6;
+  animation: acl-locate-scan 2.2s linear infinite;
+}
+.acl-activity__label {
+  color: var(--text);
+  font-family: var(--font-rounded);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  font-weight: 800;
+  text-align: center;
+}
+
+@keyframes acl-upload-pulse {
+  0%,
+  100% {
+    opacity: 0.62;
+    transform: translateY(2px) scaleY(0.72);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes acl-locate-scan {
+  0% {
+    left: 4px;
+    opacity: 0;
+    transform: translateY(0);
+  }
+  6% {
+    opacity: 1;
+  }
+  84% {
+    left: calc(100% - 38px);
+    opacity: 1;
+    transform: translateY(0);
+  }
+  88% {
+    left: calc(100% - 38px);
+    opacity: 0;
+  }
+  89% {
+    left: 4px;
+    opacity: 0;
+  }
+  100% {
+    left: 4px;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .acl-activity--uploading .acl-activity__bar,
+  .acl-activity__scanner {
+    animation: none;
+  }
+
+  .acl-activity--uploading .acl-activity__bar {
+    opacity: 1;
+    transform: none;
+  }
+
+  .acl-activity__scanner {
+    left: 4px;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* ------------------------------------------------------------------ */
