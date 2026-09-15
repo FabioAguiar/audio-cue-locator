@@ -155,16 +155,21 @@ async def _create_analysis(
     client: httpx.AsyncClient,
     source_asset_id: str,
     cue_asset_ids: list[str],
+    *,
+    minimum_similarity_score: float | None = None,
 ) -> httpx.Response:
+    body: dict[str, Any] = {
+        "source_asset_id": source_asset_id,
+        "cues": [
+            {"cue_id": f"cue-{index}", "asset_id": asset_id}
+            for index, asset_id in enumerate(cue_asset_ids, start=1)
+        ],
+    }
+    if minimum_similarity_score is not None:
+        body["minimum_similarity_score"] = minimum_similarity_score
     return await client.post(
         "/api/v1/analyses",
-        json={
-            "source_asset_id": source_asset_id,
-            "cues": [
-                {"cue_id": f"cue-{index}", "asset_id": asset_id}
-                for index, asset_id in enumerate(cue_asset_ids, start=1)
-            ],
-        },
+        json=body,
     )
 
 
@@ -301,6 +306,77 @@ def test_real_http_flow_returns_repeated_occurrences_for_one_cue(
                 [1.0, 1.0], abs=1e-6
             )
             assert all(item["matching_method"] == result["method"] for item in occurrences)
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
+def test_real_http_minimum_similarity_override_changes_candidate_acceptance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0010 threshold effect through real REST composition and matcher."""
+
+    cue_samples = [0.2, -0.8, 0.4, 0.9, -0.3, -0.6]
+    weaker_samples = [0.2, -0.8, 0.1, 0.4, 0.1, -0.1]
+    source_samples = [0.0] * 36
+    source_samples[4:10] = cue_samples
+    source_samples[24:30] = weaker_samples
+    app, executors = _build_test_app(monkeypatch, tmp_path, "similarity-threshold")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(source_samples),
+                filename="threshold-source.wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(cue_samples),
+                filename="threshold-cue.wav",
+            )
+
+            results: dict[float, dict[str, Any]] = {}
+            for threshold in (0.8, 0.9):
+                created = await _create_analysis(
+                    client,
+                    source["identifier"],
+                    [cue["identifier"]],
+                    minimum_similarity_score=threshold,
+                )
+                assert created.status_code == 202, created.text
+                location = created.headers["location"]
+                terminal = await _poll_terminal(client, location)
+                assert terminal["status"] == "succeeded"
+                response = await client.get(f"{location}/result")
+                assert response.status_code == 200, response.text
+                results[threshold] = response.json()["result"]
+
+            lower = results[0.8]
+            higher = results[0.9]
+            assert lower["configuration"]["matching"]["acceptance_threshold"] == 0.8
+            assert higher["configuration"]["matching"]["acceptance_threshold"] == 0.9
+            assert lower["configuration"]["configuration_source_name"].endswith(
+                "+request.minimum_similarity_score"
+            )
+            assert higher["method"] == "normalized_cross_correlation_multi_v1"
+
+            lower_occurrences = lower["cues"][0]["outcome"]["occurrences"]
+            higher_occurrences = higher["cues"][0]["outcome"]["occurrences"]
+            assert [
+                round(item["temporal_position"] * 48_000)
+                for item in lower_occurrences
+            ] == [4, 24]
+            assert [
+                round(item["temporal_position"] * 48_000)
+                for item in higher_occurrences
+            ] == [4]
+            assert lower_occurrences[1]["score"] < 0.9
+            assert higher_occurrences[0]["score"] > 0.9
 
     try:
         _run(_scenario())

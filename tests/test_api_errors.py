@@ -22,7 +22,10 @@ import json
 import pytest
 from fastapi.exceptions import RequestValidationError
 
-from audio_cue_locator.application.create_analysis import InvalidCueRequestError
+from audio_cue_locator.application.create_analysis import (
+    InvalidCueRequestError,
+    InvalidSimilarityScoreError,
+)
 from audio_cue_locator.application.multi_cue_orchestration import (
     AnalysisSourceInputError,
 )
@@ -83,6 +86,11 @@ MAPPED_EXCEPTIONS = [
         InvalidCueRequestError(
             "cue label contains the secret value s3cr3t-cue-label"
         ),
+        ErrorCode.VALIDATION_ERROR,
+        400,
+    ),
+    (
+        InvalidSimilarityScoreError("minimum score included s3cr3t-request-value"),
         ErrorCode.VALIDATION_ERROR,
         400,
     ),

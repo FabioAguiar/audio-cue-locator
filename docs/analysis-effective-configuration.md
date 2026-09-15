@@ -24,7 +24,8 @@ canonicalização do M1 (`src/audio_cue_locator/infrastructure/media_processing/
 nem a política de aceitação do M2 (`src/audio_cue_locator/infrastructure/acoustic_matching/baseline.py`,
 `src/audio_cue_locator/infrastructure/acoustic_matching/acceptance.py`); não
 implementa persistência de histórico de configuração entre execuções de
-Analysis; não expõe uma API pública de configuração; e não implementa
+Analysis nem uma API de configuração arbitrária; S0010 expõe somente o
+override REST restrito `minimum_similarity_score`; e não implementa
 orquestração multi-cue, política de múltiplas occurrences, o Analysis Result
 versionado, API REST, WebUI ou execução assíncrona (M3-03 a M3-06, fora de
 escopo).
@@ -201,14 +202,16 @@ registro externo de configurações versionadas.
 - Não introduz um identificador de versão de configuração.
 - Não introduz persistência de histórico de configuração entre execuções de
   Analysis.
-- Não expõe uma API pública, endpoint ou superfície de consulta de
-  configuração.
+- Não expõe uma API/endpoint de configuração arbitrária ou uma superfície de
+  consulta de configuração. S0010 acrescenta apenas um campo opcional e
+  delimitado à criação de Analysis.
 
 ## 6. Fora de Escopo Deste Documento
 
 - Persistência de `Analysis`, `EffectiveConfigurationSnapshot`, ou histórico
   de configuração em SQLite ou qualquer outro armazenamento.
-- Uma API pública ou exposta de configuração.
+- Uma API pública de configuração arbitrária. O único controle externo é o
+  `minimum_similarity_score` opcional de S0010.
 - Alterar ou re-derivar a decisão de canonicalização do M1
   (`canonical_audio.py`) ou a política de aceitação do M2 (`baseline.py`,
   `acceptance.py`); todos os três permanecem inalterados por este documento.
@@ -268,6 +271,26 @@ persistidos continuam autoexplicativos e não são migrados: o executor roteia
 pelo `matching.method`, preservando `normalized_cross_correlation_v1` como
 single-best. Nenhum campo foi acrescentado a `MatchingSnapshot`; supressão e
 limite são semânticas fixas do identificador versionado.
+
+## Proveniência e imutabilidade após S0010
+
+S0010 mantém duas origens explícitas para o mesmo método selecionado pelo
+servidor:
+
+- requisição omitida ou `null`: preserva exatamente o
+  `acceptance_threshold` de
+  `EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION` e a origem
+  `acoustic_matching.acceptance.EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION`;
+- `minimum_similarity_score` explícito em `0.0..1.0`: preserva exatamente o
+  decimal solicitado em `matching.acceptance_threshold` e registra a origem
+  estável anterior com o sufixo `+request.minimum_similarity_score`.
+
+Mesmo quando o valor explícito é numericamente igual ao default, a segunda
+origem é registrada. O snapshot embutido é persistido antes da execução e
+permanece imutável durante toda a vida da Analysis. Alterar Settings no
+navegador depois da criação afeta somente requisições futuras; o executor
+continua reconstruindo sua configuração exclusivamente do snapshot persistido.
+Nenhum campo novo ou migração de schema é necessário.
 
 ## Referências
 

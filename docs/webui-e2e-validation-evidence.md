@@ -169,6 +169,25 @@ boundary that semantic phase content remains observable, the decorative bar
 artwork remains present, and its computed `animation-name` is `none`. This is
 a static fallback check, not measured upload progress.
 
+### Minimum similarity Settings (S0010)
+
+The executable Playwright specification now asserts that the existing Settings
+dialog exposes an accessible native range labelled **Minimum similarity
+score**, with `min=0`, `max=1`, and `step=0.01`. It checks the untouched server
+default mode at the `0.71` presentation position, rejects malformed stored
+state back to that mode, moves the range to `0.90`, and verifies dialog
+close/reopen plus reload persistence through
+`audio-cue-locator.minimum-similarity-score.v1`.
+
+Against the real backend, the scenario captures the Analysis request and
+requires `minimum_similarity_score: 0.90`, then reads the real Result and
+requires the effective acceptance threshold to be `0.90`. Reset must remove
+the browser-local key, restore the recommended presentation, and make the next
+fresh-page Analysis request omit the field. It also checks that Settings copy
+contains no percentage or statistical-quality wording. No route is intercepted
+or fulfilled. These are implemented assertions, not an observed pass in this
+implementation phase.
+
 ## M6 minimum-evidence checklist
 
 The statuses below accurately describe this implementation phase. They must not
@@ -195,6 +214,7 @@ be changed to “passed” without an authorized real-backend execution.
 | Stale wait copy absent (S0006) | No user-facing `Creating…` or `Analyzing…` during the real flow | Not executed in this phase |
 | Reduced-motion fallback (S0006) | Semantic Uploading status and static artwork remain while computed continuous animation is disabled | Not executed in this phase |
 | S0009 repeated occurrence | With `E2E_REPEATED_SOURCE_MEDIA_PATH` and `E2E_REPEATED_CUE_PATH`, one real cue returns 2+ rows, chronological positions, an exact total-match badge, two-decimal visible scores, raw-score titles, and no percent wording; no Result route is mocked | Implemented; not executed in this phase |
+| S0010 Settings/local preference | Accessible `0..1`/`0.01` range, default/custom distinction, malformed-storage fallback, `0.90` persistence, real request/Result threshold, reset/key removal, and subsequent omission; no route mocking | Implemented; not executed in this phase |
 
 ## Test-phase recording requirements
 

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 
 import {
   ApiNetworkError,
@@ -126,7 +126,15 @@ function ApiErrorNotice({ error }: { error: ErrorPublic }): JSX.Element {
   );
 }
 
-export default function NewAnalysisPage(): JSX.Element {
+interface NewAnalysisPageProps {
+  minimumSimilarityScore: number | null;
+}
+
+export default function NewAnalysisPage({
+  minimumSimilarityScore,
+}: NewAnalysisPageProps): JSX.Element {
+  const minimumSimilarityScoreRef = useRef(minimumSimilarityScore);
+  minimumSimilarityScoreRef.current = minimumSimilarityScore;
   const [sourceMediaFile, setSourceMediaFile] = useState<File | null>(null);
   const [isDraggingSource, setIsDraggingSource] = useState(false);
   const [cueEntries, setCueEntries] = useState<CueFileEntry[]>([
@@ -283,6 +291,7 @@ export default function NewAnalysisPage(): JSX.Element {
       const analysisCreation = await createAnalysis(
         sourceUpload.data.identifier,
         cues,
+        minimumSimilarityScoreRef.current,
       );
       if (!analysisCreation.ok) {
         setSubmitError(analysisCreation.error);

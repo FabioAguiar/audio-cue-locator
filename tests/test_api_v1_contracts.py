@@ -188,6 +188,24 @@ def test_generated_cue_reference_schema_exposes_the_three_additive_s0003_fields(
     assert label_branch_types == {"string", "null"}
 
 
+def test_analysis_create_request_exposes_optional_bounded_similarity_score():
+    request_schema = app_module.create_app().openapi()["components"]["schemas"][
+        "AnalysisCreateRequest"
+    ]
+
+    assert set(request_schema["required"]) == {"source_asset_id", "cues"}
+    score_schema = request_schema["properties"]["minimum_similarity_score"]
+    numeric_branch = next(
+        branch for branch in score_schema["anyOf"] if branch.get("type") == "number"
+    )
+    assert numeric_branch["minimum"] == 0
+    assert numeric_branch["maximum"] == 1
+    assert {branch.get("type") for branch in score_schema["anyOf"]} == {
+        "number",
+        "null",
+    }
+
+
 def test_generated_openapi_error_and_route_surface_is_unchanged_by_s0003():
     """S0003 adds no new `ErrorCode`, route, or status: the closed v1
     operation matrix and error-code catalog stay exactly as documented."""

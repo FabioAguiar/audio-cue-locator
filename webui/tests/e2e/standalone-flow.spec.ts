@@ -51,6 +51,13 @@ interface ResultEnvelope {
   result_schema_version: string;
   result: {
     analysis_id: string;
+    configuration: {
+      matching: {
+        method: string;
+        acceptance_threshold: number;
+      };
+      configuration_source_name: string;
+    };
     cues: Array<{
       cue_id: string;
       outcome: {
@@ -276,6 +283,7 @@ async function fillAnalysisForm(
 interface SubmittedAnalysis {
   analysisId: string;
   requestCues: AnalysisCueRequestBody[];
+  minimumSimilarityScore?: number;
 }
 
 async function submitAnalysis(
@@ -330,6 +338,7 @@ async function submitAnalysis(
   await expect(page.getByText("Analyzing…", { exact: true })).toHaveCount(0);
   const requestBody = analysesRequest.postDataJSON() as {
     cues: AnalysisCueRequestBody[];
+    minimum_similarity_score?: number;
   };
 
   const analysesResponse = await analysesResponsePromise;
@@ -347,7 +356,11 @@ async function submitAnalysis(
   await postIdLocatingActivityPromise;
   await expect(page.getByText(/^Status: /)).toHaveCount(0);
 
-  return { analysisId: analysis.analysis_id, requestCues: requestBody.cues };
+  return {
+    analysisId: analysis.analysis_id,
+    requestCues: requestBody.cues,
+    minimumSimilarityScore: requestBody.minimum_similarity_score,
+  };
 }
 
 interface RejectedAnalysisSubmission {
@@ -1047,9 +1060,28 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(page.getByRole("heading", { name: "Results" })).toHaveCount(0);
   });
 
-  test("opens and closes Help and Settings dialogs accessibly", async ({ page }) => {
+  test("opens Help and configures a persistent per-Analysis similarity setting", async ({
+    page,
+  }) => {
+    test.setTimeout(analysisTimeoutMs * 2 + 30_000);
     const baseUrl = webuiBaseUrl();
+    const fixtures = fixturePaths();
     await openHomePage(page, baseUrl);
+
+    await page.evaluate(() =>
+      window.localStorage.setItem(
+        "audio-cue-locator.minimum-similarity-score.v1",
+        "not-a-valid-number",
+      ),
+    );
+    await page.reload({ waitUntil: "domcontentloaded" });
+    expect(
+      await page.evaluate(() =>
+        window.localStorage.getItem(
+          "audio-cue-locator.minimum-similarity-score.v1",
+        ),
+      ),
+    ).toBeNull();
 
     const helpButton = page.getByRole("button", { name: "Help" });
     await helpButton.focus();
@@ -1064,12 +1096,79 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await settingsButton.click();
     const settingsDialog = page.getByRole("dialog", { name: "Settings" });
     await expect(settingsDialog).toBeVisible();
-    await expect(
-      settingsDialog.getByText(/no user-configurable application/i),
-    ).toBeVisible();
+    const range = settingsDialog.getByRole("slider", {
+      name: "Minimum similarity score",
+    });
+    await expect(range).toHaveAttribute("min", "0");
+    await expect(range).toHaveAttribute("max", "1");
+    await expect(range).toHaveAttribute("step", "0.01");
+    await expect(range).toHaveValue("0.71");
+    await expect(settingsDialog.getByText(/using the server recommended default/i)).toBeVisible();
+    await expect(settingsDialog.locator("output")).toHaveText("0.71");
+    const defaultDialogText = (await settingsDialog.innerText()).toLowerCase();
+    expect(defaultDialogText).not.toMatch(/%|confidence|probability|precision|accuracy/);
+
+    await range.fill("0.90");
+    await expect(settingsDialog.locator("output")).toHaveText("0.90");
     await settingsDialog.getByRole("button", { name: "Close", exact: true }).click();
     await expect(settingsDialog).toBeHidden();
     await expect(settingsButton).toBeFocused();
+
+    await settingsButton.click();
+    await expect(range).toHaveValue("0.9");
+    await expect(settingsDialog.locator("output")).toHaveText("0.90");
+    await page.keyboard.press("Escape");
+    await expect(settingsButton).toBeFocused();
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    const restoredSettingsButton = page.getByRole("button", { name: "Settings" });
+    await restoredSettingsButton.click();
+    const restoredDialog = page.getByRole("dialog", { name: "Settings" });
+    await expect(
+      restoredDialog.getByRole("slider", { name: "Minimum similarity score" }),
+    ).toHaveValue("0.9");
+    expect(
+      await page.evaluate(() =>
+        window.localStorage.getItem(
+          "audio-cue-locator.minimum-similarity-score.v1",
+        ),
+      ),
+    ).toBe("0.9");
+    await page.keyboard.press("Escape");
+
+    const custom = await submitAnalysis(page, baseUrl, fixtures.sourceMedia, [
+      { path: fixtures.matchingCue },
+    ]);
+    expect(custom.minimumSimilarityScore).toBe(0.9);
+    const customResultResponse = await page.request.get(
+      `${baseUrl}/api/v1/analyses/${encodeURIComponent(custom.analysisId)}/result`,
+    );
+    expect(customResultResponse.status()).toBe(200);
+    const customResult = (await customResultResponse.json()) as ResultEnvelope;
+    expect(
+      customResult.result.configuration.matching.acceptance_threshold,
+    ).toBe(0.9);
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    const resetDialog = page.getByRole("dialog", { name: "Settings" });
+    await resetDialog
+      .getByRole("button", { name: "Reset to recommended default" })
+      .click();
+    await expect(resetDialog.locator("output")).toHaveText("0.71");
+    expect(
+      await page.evaluate(() =>
+        window.localStorage.getItem(
+          "audio-cue-locator.minimum-similarity-score.v1",
+        ),
+      ),
+    ).toBeNull();
+    await page.keyboard.press("Escape");
+    await page.reload({ waitUntil: "domcontentloaded" });
+
+    const reset = await submitAnalysis(page, baseUrl, fixtures.sourceMedia, [
+      { path: fixtures.matchingCue },
+    ]);
+    expect(reset.minimumSimilarityScore).toBeUndefined();
   });
 });
 

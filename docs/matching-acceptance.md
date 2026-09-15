@@ -293,6 +293,20 @@ método histórico `normalized_cross_correlation_v1`. O corpus original é
 single-occurrence; S0009 não recalibra o limiar, não o converte em confidence
 ou porcentagem e não introduz configuração fornecida pelo cliente.
 
+## Override operacional de S0010
+
+S0010 preserva integralmente a derivação histórica de
+`EVIDENCE_BASED_ACCEPTANCE_THRESHOLD`; ele não recalibra nem substitui essa
+evidência. Sem override, Analyses novas continuam usando esse valor como
+default. Quando `minimum_similarity_score` é fornecido explicitamente em uma
+requisição, seu valor em `0.0..1.0` torna-se o cutoff inclusivo
+(`score >= acceptance_threshold`) apenas daquela Analysis, sem alterar o
+método multi-occurrence, supressão, ordenação ou limite.
+
+Esse override é uma escolha operacional de filtragem/aceitação do score de
+candidato. Não é limiar de confiança estatisticamente calibrado, probabilidade,
+precisão, acurácia ou porcentagem.
+
 ## Referências
 
 - `docs/matching-contract.md` — contrato interno do matcher (M2-01); este

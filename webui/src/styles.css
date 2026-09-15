@@ -1007,6 +1007,68 @@ input:disabled {
   font-weight: 800;
   cursor: pointer;
 }
+.similarity-setting {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface-soft);
+}
+.similarity-setting-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.similarity-setting-heading label {
+  min-width: 0;
+  font-family: var(--font-rounded);
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+.similarity-setting-heading output {
+  flex: 0 0 auto;
+  color: var(--blue);
+  font-family: var(--font-rounded);
+  font-weight: 900;
+}
+.similarity-range {
+  width: 100%;
+  min-height: 44px;
+  margin: 8px 0 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+.similarity-range-bounds {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.app-dialog .similarity-setting-mode {
+  margin: 12px 0 0;
+  color: var(--navy);
+  font-weight: 700;
+}
+.app-dialog .similarity-setting-help {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+}
+.similarity-reset {
+  min-height: 44px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--blue);
+  border-radius: 999px;
+  background: #fff;
+  color: #176fd1;
+  font-weight: 800;
+  cursor: pointer;
+}
+.similarity-reset:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 /* ------------------------------------------------------------------ */
 /* Tablet: 768px .. 1023px                                              */

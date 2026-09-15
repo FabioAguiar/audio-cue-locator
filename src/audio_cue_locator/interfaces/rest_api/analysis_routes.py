@@ -152,7 +152,11 @@ def _create_analysis(
         for cue in payload.cues
     ]
     try:
-        record = use_case.create(source_asset_id=payload.source_asset_id, cues=cue_requests)
+        record = use_case.create(
+            source_asset_id=payload.source_asset_id,
+            cues=cue_requests,
+            minimum_similarity_score=payload.minimum_similarity_score,
+        )
     except (TooManyCuesError, MediaDurationExceededError) as exc:
         raise ResourceLimitExceededError(str(exc)) from exc
     except (

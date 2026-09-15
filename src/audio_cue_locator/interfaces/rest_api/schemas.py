@@ -185,17 +185,18 @@ class AnalysisCueReference(_ForbidExtraModel):
 class AnalysisCreateRequest(_ForbidExtraModel):
     """Client-supplied Analysis creation request.
 
-    Deliberately excludes any effective-configuration override: matching
-    configuration is a server-owned concern captured once per Analysis
-    (`docs/analysis-effective-configuration.md`), not a client-supplied
-    transport field. Asynchronous creation semantics and the resulting
-    `202 Accepted` response are M5-04's scope
-    (`docs/architecture.md`, "Fluxo programatico"); this schema fixes only
-    the request shape.
+    S0010 exposes exactly one optional matching input:
+    ``minimum_similarity_score``. The server still owns the matching method
+    and every other effective-configuration value, and captures the selected
+    threshold once per Analysis. Asynchronous creation semantics and the
+    resulting `202 Accepted` response are M5-04's scope.
     """
 
     source_asset_id: str
     cues: list[AnalysisCueReference] = Field(..., min_length=1)
+    minimum_similarity_score: float | None = Field(
+        default=None, ge=0.0, le=1.0, strict=True
+    )
 
 
 class AnalysisFailureCategory(str, Enum):

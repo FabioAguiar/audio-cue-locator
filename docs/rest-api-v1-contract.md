@@ -265,11 +265,13 @@ search window can never bypass or shorten that check.
 public surface; it is not part of the resource identity a client needs to
 track an Analysis.
 
-`AnalysisCreateRequest` fixes only `source_asset_id` and `cues`. It
-deliberately excludes any effective-configuration override: matching
-configuration is a server-owned concern captured once per Analysis
-(`docs/analysis-effective-configuration.md`), never a client-supplied
-transport field. It also carries no client-supplied Analysis identifier
+`AnalysisCreateRequest` contains `source_asset_id`, `cues`, and the optional
+nullable `minimum_similarity_score`. The score is the only user-controlled
+matching parameter in REST v1 and is bounded inclusively to `0.0..1.0`.
+Omitted or `null` preserves the server's exact evidence-derived default;
+an explicit value changes only `matching.acceptance_threshold` for the new
+Analysis. The method and all suppression/cap behavior remain server-owned.
+The request carries no client-supplied Analysis identifier
 or idempotency key (see "Asynchronous Analysis creation (M5-04)" below,
 no-idempotency baseline). M5-04 implements the `202 Accepted`
 asynchronous-creation response this request implies.
@@ -290,7 +292,7 @@ across every endpoint family uses this one schema
 
 | `error_code` | HTTP status | Mapped from |
 |---|---:|---|
-| `validation_error` | 422 (request-shape) or 400 (domain-level) | `RequestValidationError`; `InvalidAssetIdentifierError`; `InvalidAssetMetadataError`; `InvalidAnalysisRecordError`; `AnalysisSourceInputError`. |
+| `validation_error` | 422 (request-shape) or 400 (domain-level) | `RequestValidationError`; `InvalidAssetIdentifierError`; `InvalidAssetMetadataError`; `InvalidAnalysisRecordError`; `AnalysisSourceInputError`; `InvalidCueRequestError`; `InvalidSimilarityScoreError`. |
 | `unsupported_media` | 415 | `errors.UnsupportedMediaError` (an Application adapter in `application.create_analysis` translates an Infrastructure `media_processing.errors.InvalidMediaError`/`NoAudioStreamError`/`FFmpegExecutionError` into this type before it reaches Interfaces). Also covers an FFmpeg probe/decode subprocess timeout (`media_processing.errors.FFmpegTimeoutError`, via `create_analysis.AssetProcessingTimeoutError`): M7-02 deliberately keeps this conflation rather than adding a new `ErrorCode` (see `docs/supported-media-and-limits.md`). |
 | `resource_limit_exceeded` | 413 | `errors.ResourceLimitExceededError` (a declared size, duration, or quantity limit, for example an oversized upload, an over-duration source/cue Asset (M7-02), or too many cues). |
 | `resource_not_found` | 404 | `AssetNotFoundError`; `AnalysisNotFoundError`. |
@@ -421,7 +423,8 @@ uploaded-but-never-consumed Asset.
 ## Asynchronous Analysis creation (M5-04)
 
 `POST /api/v1/analyses` accepts an `AnalysisCreateRequest` body (one
-`source_asset_id`, a non-empty `cues` list) and returns `202 Accepted`
+`source_asset_id`, a non-empty `cues` list, and optional
+`minimum_similarity_score`) and returns `202 Accepted`
 with `AnalysisPublic` (`status: "queued"`) and a `Location` header naming
 the created Analysis's discoverable status location
 (`/api/v1/analyses/{analysis_id}`), without waiting for acoustic matching
@@ -468,11 +471,16 @@ choice between `acoustic_matching.baseline.DEFAULT_CONFIGURATION` and
 of a future Application layer". This issue's decision:
 `application.create_analysis.default_effective_configuration` copies
 `infrastructure.media_processing.canonical_audio.CANONICAL_AUDIO_SPEC`
-into `canonicalization` and **`EVIDENCE_BASED_CONFIGURATION`** (not the
-provisional `baseline.DEFAULT_CONFIGURATION`) into `matching`, recording
-`configuration_source_name = "acoustic_matching.acceptance.
-EVIDENCE_BASED_CONFIGURATION"`. Every Analysis created by this endpoint
-uses this one policy; there is no per-request override.
+into `canonicalization` and
+**`EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION`** (not the provisional
+`baseline.DEFAULT_CONFIGURATION`) into `matching`. With the setting omitted
+or `null`, the exact server threshold (currently approximately
+`0.7056698933077521`) and the named server-default provenance are captured.
+With an explicit `minimum_similarity_score`, the same
+`normalized_cross_correlation_multi_v1` method is captured with that exact
+threshold and provenance ending in `+request.minimum_similarity_score`.
+Validation/building occurs before repository creation, and execution remains
+asynchronous.
 
 ### Asset validation and canonicalization happen before persistence
 

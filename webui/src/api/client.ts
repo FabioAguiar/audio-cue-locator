@@ -193,11 +193,20 @@ export function uploadCue(file: File): Promise<ApiResult<AssetPublic>> {
 export function createAnalysis(
   sourceAssetId: string,
   cues: AnalysisCueReference[],
+  minimumSimilarityScore: number | null = null,
 ): Promise<ApiResult<AnalysisPublic>> {
+  const body: {
+    source_asset_id: string;
+    cues: AnalysisCueReference[];
+    minimum_similarity_score?: number;
+  } = { source_asset_id: sourceAssetId, cues };
+  if (minimumSimilarityScore !== null) {
+    body.minimum_similarity_score = minimumSimilarityScore;
+  }
   return requestJson<AnalysisPublic>(`${API_BASE_URL}/analyses`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_asset_id: sourceAssetId, cues }),
+    body: JSON.stringify(body),
   });
 }
 

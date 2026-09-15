@@ -5,6 +5,32 @@ import logoUrl from "./assets/audio-cue-locator-logo.svg";
 import NewAnalysisPage from "./pages/NewAnalysisPage";
 import "./styles.css";
 
+const RECOMMENDED_MINIMUM_SIMILARITY_SCORE = 0.71;
+const MINIMUM_SIMILARITY_STORAGE_KEY =
+  "audio-cue-locator.minimum-similarity-score.v1";
+
+function loadMinimumSimilarityScore(): number | null {
+  const stored = window.localStorage.getItem(MINIMUM_SIMILARITY_STORAGE_KEY);
+  if (stored === null) {
+    return null;
+  }
+  try {
+    const value: unknown = JSON.parse(stored);
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      value <= 1
+    ) {
+      return value;
+    }
+  } catch {
+    // Invalid browser-local preferences fail closed to the server default.
+  }
+  window.localStorage.removeItem(MINIMUM_SIMILARITY_STORAGE_KEY);
+  return null;
+}
+
 /**
  * Single persistent Home shell (S0004,
  * `specs/S0004-responsive-single-screen-home-design-convergence/spec.md`).
@@ -78,8 +104,30 @@ function InfoDialog({
 function App(): JSX.Element {
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [minimumSimilarityScore, setMinimumSimilarityScore] = useState<
+    number | null
+  >(loadMinimumSimilarityScore);
   const helpButtonRef = useRef<HTMLButtonElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
+
+  const displayedMinimumSimilarityScore =
+    minimumSimilarityScore ?? RECOMMENDED_MINIMUM_SIMILARITY_SCORE;
+
+  function handleMinimumSimilarityScoreChange(
+    event: React.ChangeEvent<HTMLInputElement>,
+  ): void {
+    const value = Number(event.currentTarget.value);
+    setMinimumSimilarityScore(value);
+    window.localStorage.setItem(
+      MINIMUM_SIMILARITY_STORAGE_KEY,
+      JSON.stringify(value),
+    );
+  }
+
+  function handleMinimumSimilarityScoreReset(): void {
+    setMinimumSimilarityScore(null);
+    window.localStorage.removeItem(MINIMUM_SIMILARITY_STORAGE_KEY);
+  }
 
   return (
     <div className="page-shell">
@@ -120,7 +168,7 @@ function App(): JSX.Element {
           </p>
         </section>
 
-        <NewAnalysisPage />
+        <NewAnalysisPage minimumSimilarityScore={minimumSimilarityScore} />
       </main>
 
       <InfoDialog
@@ -146,11 +194,54 @@ function App(): JSX.Element {
         onRequestClose={() => setSettingsOpen(false)}
         returnFocusRef={settingsButtonRef}
       >
-        <p>
-          The current standalone baseline exposes no user-configurable
-          application settings in the WebUI; matching/resource policy is
-          server-owned.
-        </p>
+        <section
+          className="similarity-setting"
+          aria-labelledby="minimum-similarity-label"
+        >
+          <div className="similarity-setting-heading">
+            <label
+              id="minimum-similarity-label"
+              htmlFor="minimum-similarity-score"
+            >
+              Minimum similarity score
+            </label>
+            <output htmlFor="minimum-similarity-score">
+              {displayedMinimumSimilarityScore.toFixed(2)}
+            </output>
+          </div>
+          <input
+            id="minimum-similarity-score"
+            className="similarity-range"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={displayedMinimumSimilarityScore}
+            aria-describedby="minimum-similarity-guidance minimum-similarity-mode"
+            onChange={handleMinimumSimilarityScoreChange}
+          />
+          <div className="similarity-range-bounds" aria-hidden="true">
+            <span>0.00</span>
+            <span>1.00</span>
+          </div>
+          <p id="minimum-similarity-mode" className="similarity-setting-mode">
+            {minimumSimilarityScore === null
+              ? "Using the server recommended default (displayed as 0.71)."
+              : "Custom value. Recommended default: 0.71."}
+          </p>
+          <p id="minimum-similarity-guidance" className="similarity-setting-help">
+            Lower values can return more and less-similar matches. Higher values
+            are stricter. The selected value is captured for each new Analysis.
+          </p>
+          <button
+            type="button"
+            className="similarity-reset"
+            onClick={handleMinimumSimilarityScoreReset}
+            disabled={minimumSimilarityScore === null}
+          >
+            Reset to recommended default
+          </button>
+        </section>
       </InfoDialog>
     </div>
   );

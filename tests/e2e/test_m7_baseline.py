@@ -169,16 +169,21 @@ async def _create_analysis(
     client: httpx.AsyncClient,
     source_asset_id: str,
     cue_asset_ids: list[str],
+    *,
+    minimum_similarity_score: float | None = None,
 ) -> httpx.Response:
+    body: dict[str, Any] = {
+        "source_asset_id": source_asset_id,
+        "cues": [
+            {"cue_id": f"cue-{index}", "asset_id": asset_id}
+            for index, asset_id in enumerate(cue_asset_ids, start=1)
+        ],
+    }
+    if minimum_similarity_score is not None:
+        body["minimum_similarity_score"] = minimum_similarity_score
     return await client.post(
         "/api/v1/analyses",
-        json={
-            "source_asset_id": source_asset_id,
-            "cues": [
-                {"cue_id": f"cue-{index}", "asset_id": asset_id}
-                for index, asset_id in enumerate(cue_asset_ids, start=1)
-            ],
-        },
+        json=body,
     )
 
 
@@ -339,6 +344,70 @@ def test_new_analysis_returns_multiple_occurrences_for_one_repeated_cue(
                 for item in outcome["occurrences"]
             ] == [4, 24]
             assert all(item["end"] is None for item in outcome["occurrences"])
+
+    try:
+        _run(_scenario())
+    finally:
+        _shutdown(executors)
+
+
+def test_explicit_similarity_threshold_survives_to_result_and_filters_candidates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """S0010 bounded HTTP regression over persisted execution configuration."""
+
+    cue_samples = [0.2, -0.8, 0.4, 0.9, -0.3, -0.6]
+    weaker_samples = [0.2, -0.8, 0.1, 0.4, 0.1, -0.1]
+    source_samples = [0.0] * 36
+    source_samples[4:10] = cue_samples
+    source_samples[24:30] = weaker_samples
+    _root, app, executors = _build_test_app(monkeypatch, tmp_path, "s0010-threshold")
+
+    async def _scenario():
+        async with _client(app) as client:
+            source = await _upload(
+                client,
+                "/api/v1/assets/source-media",
+                _wav_bytes(source_samples),
+                filename="threshold-source.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            cue = await _upload(
+                client,
+                "/api/v1/assets/cue",
+                _wav_bytes(cue_samples),
+                filename="threshold-cue.wav",
+                content_type="audio/wav",
+                expected_media_type="audio/wav",
+            )
+            created = await _create_analysis(
+                client,
+                source["identifier"],
+                [cue["identifier"]],
+                minimum_similarity_score=0.9,
+            )
+            assert created.status_code == 202, created.text
+            location = created.headers["location"]
+            terminal = await _poll_terminal(client, location)
+            assert terminal["status"] == "succeeded"
+
+            result_response = await client.get(f"{location}/result")
+            assert result_response.status_code == 200, result_response.text
+            result = result_response.json()["result"]
+            assert result["method"] == "normalized_cross_correlation_multi_v1"
+            assert result["configuration"]["matching"] == {
+                "method": "normalized_cross_correlation_multi_v1",
+                "acceptance_threshold": 0.9,
+            }
+            assert result["configuration"]["configuration_source_name"].endswith(
+                "+request.minimum_similarity_score"
+            )
+            occurrences = result["cues"][0]["outcome"]["occurrences"]
+            assert [
+                round(item["temporal_position"] * 48_000) for item in occurrences
+            ] == [4]
+            assert occurrences[0]["score"] > 0.9
 
     try:
         _run(_scenario())

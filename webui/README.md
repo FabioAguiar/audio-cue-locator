@@ -60,6 +60,24 @@ still applies; see `docs/vision.md`), and no media preview/play control is
 implemented (S0004, `specs/S0004-responsive-single-screen-home-design-
 convergence/spec.md`).
 
+### Settings: Minimum similarity score (S0010)
+
+The existing Settings dialog owns one global preference for each newly
+created Analysis. Its native range is `0.00..1.00` in `0.01` steps and shows
+the recommended/default position as approximately `0.71`. This presentation
+value does not replace the backend's exact default: until the user moves the
+range, Analysis creation omits `minimum_similarity_score` and the server owns
+the exact threshold.
+
+An explicit custom value is stored alone under the versioned browser-local key
+`audio-cue-locator.minimum-similarity-score.v1`, restored across reloads, and
+captured in the next Analysis request for all its Cues. Invalid stored values
+are removed and fall back to server-default behavior. **Reset to recommended
+default** clears both the custom state and key so later requests omit the
+override. Changing or resetting Settings never mutates an Analysis already
+created or running. The value is a decimal similarity filter, not a percentage
+or a statistically calibrated measure.
+
 ## Stack
 
 - React 18 + TypeScript

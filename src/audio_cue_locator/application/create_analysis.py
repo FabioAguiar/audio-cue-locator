@@ -209,6 +209,13 @@ naming the evidence-based M2-05 policy this module selects by default (gap
 G4) -- never `baseline.DEFAULT_CONFIGURATION`, which `docs/matching-
 acceptance.md` itself documents as provisional and non-calibrated."""
 
+_MINIMUM_SIMILARITY_OVERRIDE_SOURCE_NAME = (
+    f"{_EFFECTIVE_CONFIGURATION_SOURCE_NAME}+request.minimum_similarity_score"
+)
+"""Stable provenance recorded when a request explicitly supplies S0010's
+minimum-similarity override. The method family remains server-selected; only
+the acceptance threshold comes from the request."""
+
 _PCM_DTYPE_BY_SAMPLE_WIDTH: dict[int, type] = {1: np.uint8, 2: np.int16, 4: np.int32}
 
 
@@ -269,6 +276,13 @@ class InvalidCueRequestError(ValueError):
     Application, not Core or Infrastructure.
     Translated to `interfaces.rest_api.errors.ErrorCode.VALIDATION_ERROR`
     (400) by `interfaces.rest_api.errors`; no new `ErrorCode` is added."""
+
+
+class InvalidSimilarityScoreError(ValueError):
+    """Raised when a direct Application caller supplies an invalid S0010
+    minimum-similarity override. The public setting is deliberately limited
+    to finite, non-boolean numeric values in the inclusive range ``[0, 1]``.
+    REST maps this error to the existing ``validation_error`` family."""
 
 
 @dataclass(frozen=True)
@@ -349,7 +363,9 @@ def _default_clock() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def default_effective_configuration() -> EffectiveConfigurationSnapshot:
+def default_effective_configuration(
+    minimum_similarity_score: float | None = None,
+) -> EffectiveConfigurationSnapshot:
     """Build this issue's chosen default `EffectiveConfigurationSnapshot`
     (gap G4): `CANONICAL_AUDIO_SPEC` copied field-by-field into
     `canonicalization`, and
@@ -359,8 +375,34 @@ def default_effective_configuration() -> EffectiveConfigurationSnapshot:
     per call, exactly at the point of use (`docs/analysis-effective-
     configuration.md`, section 4)."""
 
+    if minimum_similarity_score is not None:
+        if isinstance(minimum_similarity_score, bool) or not isinstance(
+            minimum_similarity_score, (int, float)
+        ):
+            raise InvalidSimilarityScoreError(
+                "minimum_similarity_score must be a finite number or None"
+            )
+        if not math.isfinite(minimum_similarity_score):
+            raise InvalidSimilarityScoreError(
+                "minimum_similarity_score must be finite"
+            )
+        if not 0.0 <= minimum_similarity_score <= 1.0:
+            raise InvalidSimilarityScoreError(
+                "minimum_similarity_score must be between 0.0 and 1.0 inclusive"
+            )
+
     spec = CANONICAL_AUDIO_SPEC
     matching_policy = EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION
+    acceptance_threshold = (
+        matching_policy.acceptance_threshold
+        if minimum_similarity_score is None
+        else float(minimum_similarity_score)
+    )
+    configuration_source_name = (
+        _EFFECTIVE_CONFIGURATION_SOURCE_NAME
+        if minimum_similarity_score is None
+        else _MINIMUM_SIMILARITY_OVERRIDE_SOURCE_NAME
+    )
     return EffectiveConfigurationSnapshot(
         canonicalization=CanonicalizationSnapshot(
             sample_rate_hz=spec.sample_rate_hz,
@@ -374,9 +416,9 @@ def default_effective_configuration() -> EffectiveConfigurationSnapshot:
         ),
         matching=MatchingSnapshot(
             method=matching_policy.method,
-            acceptance_threshold=matching_policy.acceptance_threshold,
+            acceptance_threshold=acceptance_threshold,
         ),
-        configuration_source_name=_EFFECTIVE_CONFIGURATION_SOURCE_NAME,
+        configuration_source_name=configuration_source_name,
     )
 
 
@@ -709,7 +751,11 @@ class CreateAnalysisUseCase:
         return self._max_cue_media_duration_seconds
 
     def create(
-        self, *, source_asset_id: str, cues: Sequence[CueRequest]
+        self,
+        *,
+        source_asset_id: str,
+        cues: Sequence[CueRequest],
+        minimum_similarity_score: float | None = None,
     ) -> AnalysisRecord:
         """Validate, canonicalize, and persist one new Analysis, then
         schedule its matching run.
@@ -724,6 +770,10 @@ class CreateAnalysisUseCase:
         two calls with identical arguments persist two independent
         Analyses.
         """
+
+        effective_configuration = default_effective_configuration(
+            minimum_similarity_score
+        )
 
         if len(cues) > self._max_cue_count:
             raise TooManyCuesError(
@@ -798,7 +848,7 @@ class CreateAnalysisUseCase:
             analysis_id=analysis_id,
             source_asset_id=source_asset_id,
             cues=tuple(cue_references),
-            effective_configuration=default_effective_configuration(),
+            effective_configuration=effective_configuration,
             queued_at=self._clock(),
         )
 

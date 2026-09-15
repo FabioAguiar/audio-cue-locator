@@ -46,13 +46,18 @@ from audio_cue_locator.application.create_analysis import (
     AssetContentIncompatibleError,
     CueRequest,
     InvalidCueRequestError,
+    InvalidSimilarityScoreError,
     TooManyCuesError,
     _wav_bytes_to_canonical_array,
+    default_effective_configuration,
 )
 from audio_cue_locator.core.analysis_lifecycle import AnalysisLifecycleState
 from audio_cue_locator.core.asset import AssetNotFoundError, AssetType
 from audio_cue_locator.infrastructure.analysis_repository.sqlite_repository import (
     SQLiteAnalysisRepository,
+)
+from audio_cue_locator.infrastructure.acoustic_matching.acceptance import (
+    EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION,
 )
 from audio_cue_locator.infrastructure.media_processing.canonical_audio import (
     CANONICAL_AUDIO_SPEC,
@@ -286,6 +291,69 @@ def test_create_analysis_returns_immediate_queued_response_with_location(
     assert response.headers[STATUS_LOCATION_HEADER] == f"/api/v1/analyses/{public.analysis_id}"
 
 
+@pytest.mark.parametrize("minimum_similarity_score", [0.0, 0.9, 1.0])
+def test_explicit_minimum_similarity_score_is_persisted_with_override_provenance(
+    use_case, source_asset_id, cue_asset_id, minimum_similarity_score
+):
+    payload = AnalysisCreateRequest(
+        source_asset_id=source_asset_id,
+        cues=[AnalysisCueReference(cue_id="cue-1", asset_id=cue_asset_id)],
+        minimum_similarity_score=minimum_similarity_score,
+    )
+
+    public = _create_analysis(payload, Response(), use_case)
+    record = SQLiteAnalysisRepository(use_case._repository._database_path).get(
+        public.analysis_id
+    )
+
+    assert record.effective_configuration.matching.method == (
+        "normalized_cross_correlation_multi_v1"
+    )
+    assert record.effective_configuration.matching.acceptance_threshold == (
+        minimum_similarity_score
+    )
+    assert record.effective_configuration.configuration_source_name == (
+        "acoustic_matching.acceptance."
+        "EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION"
+        "+request.minimum_similarity_score"
+    )
+
+
+def test_omitted_minimum_similarity_score_persists_exact_server_default(
+    use_case, source_asset_id, cue_asset_id
+):
+    public = _create_analysis(
+        _payload(source_asset_id, cue_asset_id), Response(), use_case
+    )
+    record = SQLiteAnalysisRepository(use_case._repository._database_path).get(
+        public.analysis_id
+    )
+
+    assert record.effective_configuration.matching.method == (
+        EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION.method
+    )
+    assert record.effective_configuration.matching.acceptance_threshold == (
+        EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION.acceptance_threshold
+    )
+    assert record.effective_configuration.configuration_source_name == (
+        "acoustic_matching.acceptance."
+        "EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION"
+    )
+
+
+def test_explicit_server_default_value_still_records_request_provenance():
+    configuration = default_effective_configuration(
+        EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION.acceptance_threshold
+    )
+
+    assert configuration.matching.acceptance_threshold == (
+        EVIDENCE_BASED_MULTI_OCCURRENCE_CONFIGURATION.acceptance_threshold
+    )
+    assert configuration.configuration_source_name.endswith(
+        "+request.minimum_similarity_score"
+    )
+
+
 def test_queued_analysis_reaches_a_terminal_state_independently(
     use_case, source_asset_id, cue_asset_id
 ):
@@ -356,6 +424,44 @@ def test_excessive_cue_count_is_rejected_as_resource_limit_exceeded(
 def test_zero_cues_is_rejected_by_request_schema_validation(source_asset_id):
     with pytest.raises(ValidationError):
         AnalysisCreateRequest(source_asset_id=source_asset_id, cues=[])
+
+
+@pytest.mark.parametrize(
+    "minimum_similarity_score",
+    [True, False, "0.9", float("nan"), float("inf"), float("-inf"), -0.01, 1.01],
+)
+def test_invalid_direct_application_similarity_score_is_rejected_before_side_effects(
+    use_case, minimum_similarity_score
+):
+    submitted: list[str] = []
+
+    def _record_submit(analysis_id, source, cues):
+        submitted.append(analysis_id)
+        return Future()
+
+    use_case._executor.submit = _record_submit
+
+    with pytest.raises(InvalidSimilarityScoreError):
+        use_case.create(
+            source_asset_id="not-read-for-invalid-score",
+            cues=(),
+            minimum_similarity_score=minimum_similarity_score,
+        )
+
+    assert _persisted_count(use_case) == 0
+    assert submitted == []
+
+
+@pytest.mark.parametrize("minimum_similarity_score", [True, "0.9", -0.01, 1.01])
+def test_invalid_similarity_score_is_rejected_by_request_schema(
+    source_asset_id, minimum_similarity_score
+):
+    with pytest.raises(ValidationError):
+        AnalysisCreateRequest(
+            source_asset_id=source_asset_id,
+            cues=[AnalysisCueReference(cue_id="cue-1", asset_id="cue-asset")],
+            minimum_similarity_score=minimum_similarity_score,
+        )
 
 
 # --- canonicalization (gap G1) ----------------------------------------------
