@@ -1,58 +1,136 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/FabioAguiar/project-assets/main/projects/audio-cue-locator/logos/svg/audio-cue-locator-logo.svg" alt="Audio Cue Locator logo" width="680" />
+</p>
+
 # Audio Cue Locator
 
-Audio Cue Locator is an independent tool for locating reference acoustic cues inside larger audio or video files.
+Audio Cue Locator (ACL) is an independent tool for locating reference acoustic cues inside larger audio or video files. It accepts source media together with one or more reference cues, finds their temporal occurrences, and returns method-specific similarity scores in a structured, versioned result.
 
-The project is designed to accept a source media file together with one or more reference cues, analyze the audio, and return structured temporal occurrences with similarity scores that can be inspected by a user or consumed programmatically.
+The same backend capability is available through two first-class interfaces: a standalone WebUI for interactive use and a versioned REST API v1 for programmatic integration.
 
-> **Project status:** active development. Milestones M1-M6 are complete, delivering the canonical media pipeline, acoustic matching, the Analysis/Cue/Occurrence core, local SQLite/filesystem persistence, a versioned REST API v1, and a standalone WebUI. The project is currently at **M7 — Baseline Operacional Reproduzível**, packaging that functional baseline into a reproducible, clean-environment-buildable local runtime; see [Local Operation](#local-operation) below.
+> **Project status:** active development. Milestones M1-M6 are complete, delivering the canonical media pipeline, acoustic matching, the Analysis/Cue/Occurrence core, local SQLite/filesystem persistence, REST API v1, and the standalone WebUI. **M7 — Baseline Operacional Reproduzível** remains the active operational milestone and is packaging and validating that functional baseline as a reproducible local runtime. The authoritative status is recorded in [`docs/project-status/milestone-state.json`](docs/project-status/milestone-state.json).
 
-## What the Project Intends to Do
+## What Audio Cue Locator Does
 
-Conceptually, Audio Cue Locator will support workflows such as:
+ACL supports this workflow today:
 
 ```text
 source audio/video
         +
 reference cue(s)
         ↓
-media preparation
+media preparation and canonicalization
         ↓
 acoustic matching
         ↓
-temporal occurrences
+temporal occurrences with similarity scores
         ↓
-structured result
+structured, versioned result
 ```
 
-A future analysis may produce information such as:
+- The **standalone WebUI** uploads source media and one or more cues, creates and follows an Analysis, presents cue-level outcomes and occurrences, supports audio audition, and downloads the Result JSON.
+- The **REST API v1** exposes the same upload, Analysis lifecycle, Result, and audition capabilities to programmatic clients.
 
-```json
-{
-  "cue_id": "start",
-  "occurrences": [
-    {
-      "start_ms": 12438,
-      "score": 0.9821,
-      "method": "normalized_cross_correlation"
-    }
-  ]
-}
-```
+Both interfaces use the same Application boundary. The WebUI is an API client and does not contain a separate media-processing or matching implementation.
 
-The exact result contract, supported formats, timestamp precision, thresholds, and matching behavior are still subject to validation during the planned milestones.
+## Interface
 
-## Product Direction
+### Home
 
-The project is intended to provide two ways to use the same underlying capability:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/FabioAguiar/project-assets/main/projects/audio-cue-locator/screenshots/exports/acl-home.png" alt="Audio Cue Locator home" width="920" />
+</p>
 
-- a **standalone WebUI** for submitting media and reference cues, following analysis progress, inspecting detections, and downloading structured results;
-- a **versioned REST API** for programmatic integration.
+The Home screen provides the complete starting workflow: select source media, add one or more reference cues, and start an Analysis.
 
-Both interfaces are intended to use the same application boundary. The WebUI will not maintain a separate audio-analysis implementation.
+### Analysis setup and results
 
-## Architectural Direction
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="https://raw.githubusercontent.com/FabioAguiar/project-assets/main/projects/audio-cue-locator/screenshots/exports/acl-analysis-setup.png" alt="Audio Cue Locator analysis setup" width="100%" />
+    </td>
+    <td width="50%" valign="top">
+      <img src="https://raw.githubusercontent.com/FabioAguiar/project-assets/main/projects/audio-cue-locator/screenshots/exports/acl-analysis-results.png" alt="Audio Cue Locator analysis results" width="100%" />
+    </td>
+  </tr>
+  <tr>
+    <td valign="top"><strong>Analysis setup.</strong> Each cue can have an optional Name and optional Start/End source search bounds.</td>
+    <td valign="top"><strong>Analysis results.</strong> Multiple cues are grouped independently with their match count, failure state, search bounds, and effective matching method.</td>
+  </tr>
+</table>
 
-The planned baseline is a modular monolith with lightweight layered and Ports-and-Adapters boundaries:
+Start and End constrain where the complete cue is searched on the source-media timeline; they do not trim the cue. With both blank, ACL searches the full source. End alone searches `[0, End)`, Start alone searches `[Start, source end)`, and both search `[Start, End)`. The WebUI accepts `MM:SS`, `MM:SS.fraction`, `HH:MM:SS`, or `HH:MM:SS.fraction`, while the backend remains authoritative for duration-aware validation.
+
+### Cue match details
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/FabioAguiar/project-assets/main/projects/audio-cue-locator/screenshots/exports/acl-cue-match-details.png" alt="Audio Cue Locator cue match details" width="920" />
+</p>
+
+For each matched cue, the detail view distinguishes:
+
+- **Index** — the one-based index in canonical chronological order;
+- **Rank** — the one-based similarity ordering, sorted by raw score descending, then earlier position, then canonical index;
+- **Position** — the source-timeline position, displayed as `MM:SS` below one hour or `HH:MM:SS` from one hour, with fractional seconds floored for display only;
+- **Similarity** — the raw method-specific score displayed to two decimals, not a percentage or statistical confidence.
+
+Cue and occurrence play/stop controls fetch bounded WAV audition audio from the Analysis-scoped API endpoints. Only one playback is active at a time; playback does not perform matching in the browser.
+
+### Similarity settings
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/FabioAguiar/project-assets/main/projects/audio-cue-locator/screenshots/exports/acl-similarity-settings.png" alt="Audio Cue Locator similarity settings" width="620" />
+</p>
+
+The WebUI's **Minimum similarity score** is an optional similarity threshold for newly created Analyses. Until a user sets an override, the WebUI omits `minimum_similarity_score` and the backend supplies its exact default. A custom value is captured in the next Analysis request for all of its cues. Changing or resetting the setting does not modify an Analysis that has already been created: its effective configuration remains preserved. The value is a similarity cutoff, not a percentage or calibrated statistical confidence.
+
+See [`webui/README.md`](webui/README.md) for the complete interaction semantics.
+
+## Acoustic Matching
+
+The current implemented baseline is the versioned method **`normalized_cross_correlation_multi_v1`**. ACL canonicalizes the source and cues, computes normalized cross-correlation scores over valid source windows, and applies the Analysis's effective acceptance threshold. The current multi-occurrence producer:
+
+- accepts candidates whose score meets or exceeds the effective threshold;
+- suppresses overlapping full-cue windows after considering higher-scoring candidates first;
+- returns the selected occurrences in chronological order, within the method's documented bound;
+- supports independent outcomes for multiple cues in one Analysis.
+
+Each Analysis preserves an effective configuration snapshot containing the canonicalization parameters, matching method and acceptance threshold, and configuration provenance. Omitting the REST override keeps the evidence-based backend default; an explicit `minimum_similarity_score` is captured exactly for that Analysis. This makes result-affecting configuration traceable and prevents later default changes from reinterpreting an existing Analysis.
+
+A matching **score** expresses similarity according to this method. It is not a calibrated probability, is not statistical confidence, and must not be assumed comparable with scores from a different future method.
+
+The detailed contracts and evidence are documented in [`docs/matching-contract.md`](docs/matching-contract.md), [`docs/matching-baseline.md`](docs/matching-baseline.md), [`docs/matching-acceptance.md`](docs/matching-acceptance.md), [`docs/matching-benchmark.md`](docs/matching-benchmark.md), [`docs/matching-regression.md`](docs/matching-regression.md), and [`docs/matching-robustness.md`](docs/matching-robustness.md).
+
+## REST API v1
+
+REST API v1 is a public application interface, not merely an internal transport for the WebUI. It exposes asynchronous Analysis creation and persisted lifecycle status under the `/api/v1` namespace.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/health` | Check API v1 liveness. |
+| `POST` | `/api/v1/assets/source-media` | Upload a bounded source-media Asset. |
+| `POST` | `/api/v1/assets/cue` | Upload a bounded cue Asset. |
+| `POST` | `/api/v1/analyses` | Create an asynchronous Analysis from Asset identities. |
+| `GET` | `/api/v1/analyses/{analysis_id}` | Read the current persisted Analysis status. |
+| `GET` | `/api/v1/analyses/{analysis_id}/result` | Retrieve the structured Result for a succeeded Analysis. |
+| `GET` | `/api/v1/analyses/{analysis_id}/cues/{cue_id}/audio` | Audition the original cue WAV for a completed Analysis. |
+| `GET` | `/api/v1/analyses/{analysis_id}/cues/{cue_id}/occurrences/{occurrence_index}/audio` | Audition the source-time window represented by an accepted occurrence. |
+
+A programmatic client typically:
+
+1. uploads source media;
+2. uploads one or more cues;
+3. creates an Analysis;
+4. polls its persisted status until a terminal state;
+5. retrieves the structured Result after success;
+6. optionally auditions cue or occurrence audio while the required stored media remains available.
+
+Analysis states are `queued`, `running`, `succeeded`, and `failed`. Result retrieval and audition are lifecycle-gated, and `occurrence_index` in the audition route is zero-based against the canonical occurrence array. See [`docs/rest-api-v1-contract.md`](docs/rest-api-v1-contract.md) for request and response schemas, error envelopes, lifecycle behavior, upload rules, and audition guardrails.
+
+## Architecture
+
+ACL is implemented as a modular monolith with lightweight layered and Ports-and-Adapters boundaries:
 
 ```text
 WebUI
@@ -71,134 +149,135 @@ Infrastructure
   └── local job execution
 ```
 
-The current architectural baseline selects:
+The current stack comprises:
 
-- **Python** for backend and processing;
-- **FastAPI** for the REST interface;
+- **Python** for the backend and media-analysis application;
+- **FastAPI** for REST API v1;
 - **Pydantic** for transport validation and API schemas;
-- **FFmpeg** for media probing, decoding, extraction, and canonicalization;
-- **NumPy / SciPy** as the initial numerical foundation for acoustic matching;
-- **SQLite** for local analysis state and metadata;
-- **local filesystem storage** for media and runtime artifacts.
+- **FFmpeg** for media probing, decoding, extraction, canonicalization, and occurrence audition rendering;
+- **NumPy / SciPy** for numerical processing and acoustic matching;
+- **SQLite** for local Analysis state and metadata;
+- **local filesystem storage** for uploaded media and runtime artifacts;
+- **React, TypeScript, and Vite** for the standalone WebUI.
 
-These choices establish the initial architecture but remain subject to evidence-driven revision where the project documentation explicitly identifies open technical questions.
+The Core remains independent of HTTP, UI, database, filesystem, FFmpeg, and numerical implementation details. Infrastructure implements those mechanisms behind application-facing ports. The WebUI communicates exclusively through REST API v1.
+
+See [`docs/architecture.md`](docs/architecture.md) for boundaries, runtime decisions, security constraints, risks, and trade-offs.
 
 ## Core Concepts
 
-The planned product model centers on a small set of generic concepts:
-
 - **Asset** — an identifiable source media file, reference cue, or managed artifact;
-- **Analysis** — a request to locate one or more cues in a source;
+- **Analysis** — a request to locate one or more cues in a source, with a persisted lifecycle and effective configuration;
 - **Cue** — a reference acoustic sample used for matching;
-- **Occurrence** — a temporal location associated with a cue and a matching score;
-- **Analysis Result** — the structured, versioned output of an analysis.
+- **Occurrence** — a temporal source location associated with a cue, a matching method, and a similarity score;
+- **Analysis Result** — the structured, independently versioned output of a completed Analysis.
 
-The core is intentionally domain-neutral. Audio Cue Locator is responsible for locating acoustic references, not for assigning application-specific meaning to what those detections represent.
-
-## Score vs. Confidence
-
-The project deliberately distinguishes a matching **score** from statistical **confidence**.
-
-A score expresses the output of a matching method. It must not be presented as calibrated confidence unless a future methodology provides evidence that supports that interpretation.
-
-## Current Milestone
-
-The current operational milestone is:
-
-**M7 — Baseline Operacional Reproduzível**
-
-Milestones M1 through M6 are complete: canonical media pipeline, acoustic matching, the Analysis/Cue/Occurrence core with structured results, local SQLite/filesystem persistence, versioned REST API v1, and a standalone WebUI. M7 packages that existing functional baseline into a reproducible, clean-environment-buildable local runtime with controlled dependencies, predictable FFmpeg availability, safe example configuration, and a documented build/start/stop/health procedure. See [`docs/milestones.md`](docs/milestones.md) for the full milestone plan and Definition of Done.
-
-See [Local Operation](#local-operation) below for the packaged runtime this milestone establishes.
-
-## Planned Milestones
-
-| Milestone | Focus | Expected outcome |
-|---|---|---|
-| M1 | Foundation and canonical media | Deterministic canonical-audio pipeline for validated inputs |
-| M2 | Acoustic matching | Validated single-cue matching baseline with timestamp and score |
-| M3 | Analysis and structured results | Core Analysis/Cue/Occurrence model with multi-cue and multi-occurrence results |
-| M4 | Persistent local lifecycle | Local assets, SQLite persistence, and asynchronous local analysis lifecycle |
-| M5 | REST API v1 | Versioned API for uploads, analysis creation, status, and results |
-| M6 | Standalone WebUI | Complete human-facing workflow built exclusively on the REST API |
-| M7 | Reproducible operational baseline | Packaged, observable, constrained, end-to-end validated local product |
-
-The milestone plan is intentionally incremental. Distributed execution, remote object storage, advanced authentication, and similar infrastructure are not part of the initial baseline unless later evidence establishes a concrete need.
-
-## Design Principles
-
-Audio Cue Locator is being developed around the following principles:
-
-- validate acoustic assumptions before building sophisticated interfaces around them;
-- keep the analysis core independent of HTTP, UI, database, and filesystem details;
-- keep WebUI and programmatic clients on the same application boundary;
-- separate control-plane metadata from large media artifacts;
-- treat potentially long analyses as jobs without requiring distributed infrastructure initially;
-- expose structured failures instead of silently converting processing errors into empty detections;
-- make parameters that affect results explicit and traceable;
-- prefer reproducibility and measurable evidence over premature optimization;
-- keep the local baseline simple enough to run, test, and understand without cloud infrastructure.
-
-## Non-Goals for the Initial Baseline
-
-The initial project does not aim to provide:
-
-- semantic sound classification without a reference cue;
-- machine-learning model training as a core requirement;
-- OCR or visual analysis;
-- automated video editing;
-- real-time audio streaming;
-- distributed processing;
-- Kubernetes or service-mesh infrastructure;
-- mandatory cloud or object storage;
-- enterprise authentication or multi-tenancy;
-- calibrated statistical confidence without supporting methodology.
-
-These areas may only be reconsidered later if the project develops a concrete requirement for them.
-
-## Repository Documentation
-
-The current repository documentation is the authoritative starting point for the project:
-
-- [`docs/vision.md`](docs/vision.md) — product purpose, scope, constraints, success criteria, and open questions;
-- [`docs/architecture.md`](docs/architecture.md) — architectural boundaries, responsibilities, runtime choices, risks, and validation criteria;
-- [`docs/milestones.md`](docs/milestones.md) — planned capability progression and completion criteria;
-- [`docs/project-status/milestone-state.json`](docs/project-status/milestone-state.json) — operational milestone cursor.
-
-The milestone plan and operational state are intentionally separate: `docs/milestones.md` describes planned evolution, while the state file records which milestone is currently active.
+The model is intentionally domain-neutral. ACL locates acoustic references; it does not assign application-specific meaning to the detections.
 
 ## Local Operation
 
-The complete backend (FastAPI REST API v1, SQLite/filesystem persistence, FFmpeg-backed Media Processing) and the standalone WebUI are packaged as two container images built from a single [`Dockerfile`](Dockerfile) and orchestrated by [`compose.yaml`](compose.yaml):
+The backend and WebUI are built as two images from the repository's [`Dockerfile`](Dockerfile) and orchestrated by [`compose.yaml`](compose.yaml). Docker Engine with BuildKit and the Docker Compose plugin are required; Python, FFmpeg, Node, and project dependencies are installed inside the images.
+
+From the repository root:
 
 ```bash
 docker compose build
 docker compose up
 ```
 
-- REST API v1: `http://localhost:8000/api/v1` (health check: `GET /api/v1/health`)
-- WebUI: `http://localhost:8080`
+The current Compose configuration binds both services to host loopback:
 
-Stop the runtime with:
+- REST API v1: `http://localhost:18000/api/v1`
+- WebUI: `http://localhost:18081`
+- Health: `GET http://localhost:18000/api/v1/health`
+
+The API container listens internally on port `8000`; the WebUI container reverse-proxies same-origin `/api/v1` requests to it. Stop the runtime without deleting its named data volume with:
 
 ```bash
 docker compose down
 ```
 
-See [`docs/local-operation.md`](docs/local-operation.md) for the full clean-build, startup, shutdown, storage, health-check, and configuration reference, including the two-container topology's rationale and known limitations.
+See [`docs/local-operation.md`](docs/local-operation.md) for the runtime topology, build and health procedures, storage, retention, configuration, and known limitations. When a documented host port differs, [`compose.yaml`](compose.yaml) is the executable source of truth for the current binding.
 
-## Validated Demonstration
+## Validation and Development Status
 
-Once the runtime above is up, both supported access modes can be exercised end to end:
+The operational milestone cursor is intentionally separate from the milestone plan. M1-M6 are completed and locked; M7 remains active.
 
-- **Standalone (WebUI):** open `http://localhost:8080`, submit a source media file together with one or more reference cues, follow the Analysis while it runs, then inspect and download the structured JSON result.
-- **Programmatic (REST API v1):** upload a source and cue via `POST /api/v1/assets/source-media` and `POST /api/v1/assets/cue`, create an Analysis via `POST /api/v1/analyses`, poll `GET /api/v1/analyses/{analysis_id}` until it reaches a terminal state, then retrieve `GET /api/v1/analyses/{analysis_id}/result`. See [`docs/rest-api-v1-contract.md`](docs/rest-api-v1-contract.md) for the full request/response contract.
+| Milestone | Focus | Operational status |
+|---|---|---|
+| M1 | Foundation and canonical media | Completed |
+| M2 | Acoustic matching baseline | Completed |
+| M3 | Analysis and structured results | Completed |
+| M4 | Persistent local lifecycle | Completed |
+| M5 | REST API v1 | Completed |
+| M6 | Standalone WebUI | Completed |
+| M7 | Reproducible operational baseline | Active |
 
-Both paths exercise the same real backend, API, storage, executor, media processing, and matcher — neither is a simulated or mocked demonstration. See [`docs/baseline-validation.md`](docs/baseline-validation.md) for the full M7 release-validation procedure, scenario-to-Definition-of-Done traceability matrix, and the regression/benchmark evidence this milestone records.
+The repository includes matching benchmarks, regression and robustness evidence, API integration coverage, WebUI end-to-end specifications, and an M7 release-validation procedure. The M7 record explicitly distinguishes authored validation procedures from executed evidence; its operational status must not be inferred as complete from the existence of those assets. See [`docs/baseline-validation.md`](docs/baseline-validation.md) and [`docs/milestones.md`](docs/milestones.md).
 
-## Development Status
+The supported local runtime is development-grade. Public or multi-user deployment remains out of scope until a separate security review addresses authentication, TLS, external exposure, and isolation.
 
-Local installation and execution are documented in [Local Operation](#local-operation) above, via the packaged Docker/Compose runtime established during M7. Public or multi-user deployment is out of scope until a separate, explicitly authorized security review permits it (see [`docs/architecture.md`](docs/architecture.md)).
+## Future Matching Directions
+
+`normalized_cross_correlation_multi_v1` remains the **current implemented baseline**. The techniques below are candidate directions for future investigation only. Except for the current baseline row, they are not implemented ACL capabilities, approved milestones, release commitments, or guarantees; each would be subject to benchmarking and empirical validation.
+
+| Technique | Potential use | Example tunable parameters |
+|---|---|---|
+| **Normalized cross-correlation — CURRENT BASELINE** | Exact or near-exact cue matching; current ACL baseline | similarity threshold; potential future controls for minimum distance and maximum occurrences |
+| Matched filtering | Detecting a known pattern in noise | threshold, normalization, window |
+| GCC / GCC-PHAT | Robust temporal alignment | weighting, window, lag range |
+| Spectrogram correlation | Similar spectral structure under moderate changes | FFT size, hop length, window, min/max frequency, threshold |
+| MFCC similarity | Similar acoustic content despite some timbre/level variation | number of MFCCs, frame size, hop length, distance metric, threshold |
+| Chroma matching | Musical, melodic, or harmonic matching | chroma bins, hop length, normalization, threshold |
+| Dynamic Time Warping (DTW) | Similar sequences with moderate timing/speed variation | distance metric, band/window constraint, feature type, threshold |
+| Audio fingerprinting | Recognition of recordings or modified copies | peak density, fan-out, time tolerance, frequency tolerance |
+| Audio embeddings + similarity | Broader acoustic or semantic similarity | embedding model, window size, overlap, cosine threshold, top-k |
+
+The parameter examples for exploratory methods are illustrative, not existing API fields. In the current baseline, only the similarity threshold is exposed as a request override; overlap suppression and the maximum-occurrence bound are method-defined rather than client-tunable.
+
+Potential standalone or composed approaches may include spectrogram correlation, MFCC + DTW, Chroma + DTW, audio fingerprinting, and audio embeddings + similarity. These techniques may have method-specific hyperparameters and configuration schemas. Their inclusion would require explicit parameters, traceable effective configuration, reproducible results, benchmarks, regression testing, empirical validation, and a stable versioned matching-method identifier. Not all candidates are expected to be implemented, and none changes ACL into a general-purpose semantic sound-classification system.
+
+## Design Principles
+
+- validate acoustic assumptions before building sophistication around them;
+- keep the analysis core independent of HTTP, UI, database, filesystem, and algorithm adapters;
+- keep WebUI and programmatic clients on the same application boundary;
+- separate control-plane metadata from large media artifacts;
+- treat potentially long analyses as jobs without requiring distributed infrastructure;
+- expose structured failures instead of converting processing errors into empty detections;
+- make result-affecting parameters explicit and traceable;
+- prefer reproducibility and measurable evidence over premature optimization;
+- keep the local baseline simple enough to run, test, and understand without cloud infrastructure.
+
+## Non-Goals and Current Limitations
+
+The current project does not aim to provide:
+
+- semantic sound classification without an appropriate reference or model;
+- machine-learning model training as a core requirement;
+- OCR or visual analysis;
+- automated video editing;
+- real-time audio streaming;
+- distributed processing, Kubernetes, service-mesh, or broker infrastructure;
+- mandatory cloud or object storage;
+- enterprise authentication or multi-tenancy;
+- calibrated statistical confidence without a supporting methodology.
+
+Future matching research remains constrained to ACL's cue-location problem and does not implicitly expand these goals. The current matcher has method- and evidence-corpus-specific robustness limits, and more complex techniques must demonstrate a measured advantage before adoption. The packaged runtime is local-first, uses SQLite and filesystem storage, and does not by itself provide production deployment security controls.
+
+## Documentation
+
+The repository documentation remains the source of truth for detailed behavior:
+
+- [`docs/vision.md`](docs/vision.md) — purpose, scope, constraints, success criteria, and open questions;
+- [`docs/architecture.md`](docs/architecture.md) — architectural boundaries, responsibilities, runtime choices, risks, and validation criteria;
+- [`docs/milestones.md`](docs/milestones.md) and [`docs/project-status/milestone-state.json`](docs/project-status/milestone-state.json) — planned capability progression and the separate operational milestone cursor;
+- [`docs/rest-api-v1-contract.md`](docs/rest-api-v1-contract.md) — public REST API v1 transport contract;
+- [`docs/local-operation.md`](docs/local-operation.md) — packaged local runtime, storage, retention, and operational procedures;
+- [`docs/baseline-validation.md`](docs/baseline-validation.md) — M7 validation scope and evidence record;
+- [`docs/matching-contract.md`](docs/matching-contract.md) and [`docs/matching-acceptance.md`](docs/matching-acceptance.md) — score, matching, and acceptance semantics;
+- [`docs/analysis-effective-configuration.md`](docs/analysis-effective-configuration.md) and [`docs/analysis-result-schema.md`](docs/analysis-result-schema.md) — configuration traceability and structured Result schema;
+- [`webui/README.md`](webui/README.md) — WebUI behavior, field semantics, result presentation, and API boundary.
 
 ## License
 
