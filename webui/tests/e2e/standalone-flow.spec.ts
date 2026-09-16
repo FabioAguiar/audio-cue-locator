@@ -2,6 +2,7 @@ import {
   expect,
   test,
   type Download,
+  type Locator,
   type Page,
   type Request,
 } from "@playwright/test";
@@ -501,6 +502,82 @@ function formatExpectedClock(seconds: number): string {
   )}:${String(secondsPart).padStart(2, "0")}`;
 }
 
+const removedSettingsCopy = [
+  "Using the server recommended default",
+  "Custom value. Recommended default",
+  "Lower values can return more and less-similar matches",
+  "Higher values are stricter",
+  "The selected value is captured for each new Analysis",
+] as const;
+
+async function assertRemovedSettingsCopyAbsent(dialog: Locator): Promise<void> {
+  const renderedContent = await dialog.evaluate((root) => ({
+    text: root.textContent ?? "",
+    attributeValues: Array.from(root.querySelectorAll("*")).flatMap((element) =>
+      Array.from(element.attributes, (attribute) => attribute.value),
+    ),
+  }));
+  const attributeText = renderedContent.attributeValues.join("\n");
+
+  for (const copy of removedSettingsCopy) {
+    expect(renderedContent.text).not.toContain(copy);
+    expect(attributeText).not.toContain(copy);
+  }
+  await expect(dialog.locator("#minimum-similarity-mode")).toHaveCount(0);
+  await expect(dialog.locator("#minimum-similarity-guidance")).toHaveCount(0);
+  expect(
+    await dialog
+      .getByRole("slider", { name: "Minimum similarity score" })
+      .getAttribute("aria-describedby"),
+  ).toBeNull();
+}
+
+async function assertDisclosureRightEdge(
+  page: Page,
+  group: Locator,
+  disclosure: Locator,
+  viewport: { width: number; height: number },
+): Promise<number> {
+  const epsilon = 0.5;
+  await page.setViewportSize(viewport);
+  await disclosure.scrollIntoViewIfNeeded();
+
+  const groupBox = await group.boundingBox();
+  const disclosureBox = await disclosure.boundingBox();
+  if (!groupBox || !disclosureBox) {
+    throw new Error("Cue group disclosure geometry is not measurable");
+  }
+  const metrics = await group.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return {
+      borderLeft: Number.parseFloat(style.borderLeftWidth),
+      borderRight: Number.parseFloat(style.borderRightWidth),
+    };
+  });
+  const disclosureRadius = await disclosure.evaluate((element) =>
+    Number.parseFloat(window.getComputedStyle(element).borderRadius),
+  );
+  const groupInnerLeft = groupBox.x + metrics.borderLeft;
+  const groupInnerRight = groupBox.x + groupBox.width - metrics.borderRight;
+  const disclosureRight = disclosureBox.x + disclosureBox.width;
+  const rightInset = groupInnerRight - disclosureRight;
+
+  expect(disclosureBox.x).toBeGreaterThanOrEqual(groupInnerLeft - epsilon);
+  expect(disclosureRight).toBeLessThanOrEqual(groupInnerRight + epsilon);
+  expect(rightInset).toBeGreaterThanOrEqual(-epsilon);
+  expect(rightInset).toBeLessThanOrEqual(4 + epsilon);
+  expect(Math.abs(disclosureBox.width - 44)).toBeLessThanOrEqual(epsilon);
+  expect(Math.abs(disclosureBox.height - 44)).toBeLessThanOrEqual(epsilon);
+  expect(disclosureRadius).toBeGreaterThanOrEqual(22 - epsilon);
+
+  const overflow = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }));
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
+  return rightInset;
+}
+
 test.describe.serial("standalone WebUI against the real REST API", () => {
   test("renders the single-screen Home shell with Source before Cues and no Results initially", async ({
     page,
@@ -638,6 +715,33 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       name: "Collapse results for First cue",
     });
     await expect(firstDisclosure).toHaveAttribute("aria-expanded", "true");
+    const firstDetailsId = await firstDisclosure.getAttribute("aria-controls");
+    if (!firstDetailsId) {
+      throw new Error("Disclosure has no aria-controls target");
+    }
+    await expect(
+      firstGroup.locator(".cue-result-group__header > button").last(),
+    ).toHaveAttribute("aria-controls", firstDetailsId);
+    await expect(firstGroup.locator(`[id="${firstDetailsId}"]`)).toBeVisible();
+
+    for (const viewport of [
+      { label: "390", width: 390, height: 844 },
+      { label: "820", width: 820, height: 1180 },
+      { label: "1440", width: 1440, height: 900 },
+    ]) {
+      await test.step(
+        `disclosure stays at the right edge at ${viewport.label}px`,
+        async () => {
+          await assertDisclosureRightEdge(
+            page,
+            firstGroup,
+            firstDisclosure,
+            viewport,
+          );
+        },
+      );
+    }
+
     await firstDisclosure.click();
     await expect(firstGroup.locator(".cue-result-group__details")).toBeHidden();
     await expect(secondGroup.locator(".cue-result-group__details")).toBeVisible();
@@ -1301,13 +1405,14 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(range).toHaveAttribute("max", "1");
     await expect(range).toHaveAttribute("step", "0.01");
     await expect(range).toHaveValue("0.71");
-    await expect(settingsDialog.getByText(/using the server recommended default/i)).toBeVisible();
+    await assertRemovedSettingsCopyAbsent(settingsDialog);
     await expect(settingsDialog.locator("output")).toHaveText("0.71");
     const defaultDialogText = (await settingsDialog.innerText()).toLowerCase();
     expect(defaultDialogText).not.toMatch(/%|confidence|probability|precision|accuracy/);
 
     await range.fill("0.90");
     await expect(settingsDialog.locator("output")).toHaveText("0.90");
+    await assertRemovedSettingsCopyAbsent(settingsDialog);
     await settingsDialog.getByRole("button", { name: "Close", exact: true }).click();
     await expect(settingsDialog).toBeHidden();
     await expect(settingsButton).toBeFocused();
@@ -1315,6 +1420,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await settingsButton.click();
     await expect(range).toHaveValue("0.9");
     await expect(settingsDialog.locator("output")).toHaveText("0.90");
+    await assertRemovedSettingsCopyAbsent(settingsDialog);
     await page.keyboard.press("Escape");
     await expect(settingsButton).toBeFocused();
 
@@ -1325,6 +1431,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
     await expect(
       restoredDialog.getByRole("slider", { name: "Minimum similarity score" }),
     ).toHaveValue("0.9");
+    await assertRemovedSettingsCopyAbsent(restoredDialog);
     expect(
       await page.evaluate(() =>
         window.localStorage.getItem(
@@ -1353,6 +1460,7 @@ test.describe.serial("standalone WebUI against the real REST API", () => {
       .getByRole("button", { name: "Reset to recommended default" })
       .click();
     await expect(resetDialog.locator("output")).toHaveText("0.71");
+    await assertRemovedSettingsCopyAbsent(resetDialog);
     expect(
       await page.evaluate(() =>
         window.localStorage.getItem(

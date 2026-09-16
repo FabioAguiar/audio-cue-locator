@@ -848,7 +848,7 @@ input:disabled {
   align-items: center;
   gap: 6px 8px;
   min-width: 0;
-  padding: 8px;
+  padding: 8px 2px 8px 8px;
 }
 .cue-result-identity {
   display: flex;
@@ -1166,15 +1166,6 @@ input:disabled {
   color: var(--muted);
   font-size: 0.75rem;
 }
-.app-dialog .similarity-setting-mode {
-  margin: 12px 0 0;
-  color: var(--navy);
-  font-weight: 700;
-}
-.app-dialog .similarity-setting-help {
-  margin: 8px 0 0;
-  font-size: 0.8rem;
-}
 .similarity-reset {
   min-height: 44px;
   margin-top: 10px;
@@ -1246,10 +1237,13 @@ input:disabled {
   }
   .cue-result-window,
   .cue-result-status,
-  .cue-result-method,
-  .cue-disclosure-button {
+  .cue-result-method {
     grid-column: auto;
     grid-row: auto;
+  }
+  .cue-disclosure-button {
+    grid-column: 6;
+    grid-row: 1;
   }
   .cue-result-window {
     justify-content: center;

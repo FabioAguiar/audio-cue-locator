@@ -217,22 +217,12 @@ function App(): JSX.Element {
             max="1"
             step="0.01"
             value={displayedMinimumSimilarityScore}
-            aria-describedby="minimum-similarity-guidance minimum-similarity-mode"
             onChange={handleMinimumSimilarityScoreChange}
           />
           <div className="similarity-range-bounds" aria-hidden="true">
             <span>0.00</span>
             <span>1.00</span>
           </div>
-          <p id="minimum-similarity-mode" className="similarity-setting-mode">
-            {minimumSimilarityScore === null
-              ? "Using the server recommended default (displayed as 0.71)."
-              : "Custom value. Recommended default: 0.71."}
-          </p>
-          <p id="minimum-similarity-guidance" className="similarity-setting-help">
-            Lower values can return more and less-similar matches. Higher values
-            are stricter. The selected value is captured for each new Analysis.
-          </p>
           <button
             type="button"
             className="similarity-reset"
