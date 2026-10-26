@@ -1,0 +1,132 @@
+pipeline {
+    agent none
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+    }
+    parameters {
+        string(name: 'APPROVED_AGENT_LABEL', defaultValue: '', description: 'Operator-approved isolated agent label; blank blocks execution.')
+        string(name: 'EXPECTED_COMMIT', defaultValue: '', description: 'Trusted full 40-character commit SHA, also pinned in the job SCM configuration.')
+    }
+    stages {
+        stage('Require operator runner and revision selection') {
+            steps {
+                script {
+                    if (!(params.APPROVED_AGENT_LABEL ==~ /[A-Za-z0-9][A-Za-z0-9_-]{0,63}/)) {
+                        error('JENKINS_RUNTIME_BLOCKED: select an approved isolated agent label')
+                    }
+                    if (!(params.EXPECTED_COMMIT ==~ /[0-9a-f]{40}/)) {
+                        error('JENKINS_RUNTIME_BLOCKED: a trusted full commit SHA is required')
+                    }
+                }
+            }
+        }
+        stage('ACL checks on approved runner') {
+            agent { label "${params.APPROVED_AGENT_LABEL}" }
+            environment {
+                PYTHONDONTWRITEBYTECODE = '1'
+                PYTEST_ADDOPTS = '-p no:cacheprovider'
+                PIP_DISABLE_PIP_VERSION_CHECK = '1'
+                PIP_NO_CACHE_DIR = '1'
+                npm_config_engine_strict = 'true'
+            }
+            stages {
+                stage('Checkout trusted revision') {
+                    steps {
+                        // This dedicated job must have an isolated, disposable workspace.
+                        deleteDir()
+                        script {
+                            def revision = checkout scm
+                            def observed = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            if (observed != params.EXPECTED_COMMIT || observed != revision.GIT_COMMIT) {
+                                error('JENKINS_RUNTIME_BLOCKED: requested and observed SCM revisions differ')
+                            }
+                            echo "ACL source commit: ${observed}"
+                            currentBuild.description = observed
+                            sh 'mkdir -p ci-results'
+                            writeFile(file: 'ci-results/revision.txt', text: "${observed}\n")
+                            env.CI_WORKDIR = sh(script: 'mktemp -d "${TMPDIR:-/tmp}/acl-ci.XXXXXX"', returnStdout: true).trim()
+                            env.TMPDIR = "${env.CI_WORKDIR}/tmp"
+                            env.AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT = "${env.CI_WORKDIR}/assets"
+                            env.AUDIO_CUE_LOCATOR_ANALYSIS_DB_PATH = "${env.CI_WORKDIR}/analysis.sqlite3"
+                        }
+                        sh '''
+                            set -eu
+                            mkdir -p "$TMPDIR" "$AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT"
+                        '''
+                    }
+                }
+                stage('Verify prerequisites and install Python tests') {
+                    steps {
+                        sh '''
+                            set -eu
+                            python3.11 -m venv "$CI_WORKDIR/venv"
+                            . "$CI_WORKDIR/venv/bin/activate"
+                            python tests/test_ci_pipeline_contract.py prerequisites
+                            python -m pip install -e '.[test]'
+                        '''
+                    }
+                }
+                stage('Python regression') {
+                    steps {
+                        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                            sh '''
+                                set -eu
+                                . "$CI_WORKDIR/venv/bin/activate"
+                                python -m pytest -q tests --junitxml=ci-results/pytest.xml
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            // Publish even on assertion failures; absent/invalid reports fail.
+                            catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                                sh '''
+                                    set -eu
+                                    . "$CI_WORKDIR/venv/bin/activate"
+                                    python tests/test_ci_pipeline_contract.py junit-structure ci-results/pytest.xml
+                                '''
+                                junit testResults: 'ci-results/pytest.xml', allowEmptyResults: false, keepLongStdio: false
+                                sh '''
+                                    set -eu
+                                    . "$CI_WORKDIR/venv/bin/activate"
+                                    python tests/test_ci_pipeline_contract.py junit ci-results/pytest.xml
+                                '''
+                            }
+                        }
+                    }
+                }
+                stage('WebUI build') {
+                    steps {
+                        dir('webui') {
+                            sh '''
+                                set -eu
+                                npm ci
+                                npm run build
+                            '''
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'ci-results/revision.txt', allowEmptyArchive: false
+                }
+                cleanup {
+                    sh '''
+                        set -eu
+                        if [ -n "${CI_WORKDIR:-}" ]; then
+                            case "$CI_WORKDIR" in
+                                */acl-ci.*) rm -rf -- "$CI_WORKDIR" ;;
+                                *) exit 1 ;;
+                            esac
+                        fi
+                    '''
+                    deleteDir()
+                }
+            }
+        }
+    }
+}

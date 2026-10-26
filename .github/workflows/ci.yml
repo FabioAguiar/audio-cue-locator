@@ -1,0 +1,93 @@
+name: ACL CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Python regression and WebUI build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTEST_ADDOPTS: '-p no:cacheprovider'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_CACHE_DIR: '1'
+      npm_config_engine_strict: 'true'
+    steps:
+      - name: Check out event revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Set up Node 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: Provision media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+      - name: Associate revision and isolate storage
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          observed=$(git rev-parse HEAD)
+          test "$observed" = "$EXPECTED_COMMIT"
+          mkdir -p ci-results
+          printf '%s\n' "$observed" | tee ci-results/revision.txt
+          ci_workdir=$(mktemp -d "$RUNNER_TEMP/acl-ci.XXXXXX")
+          mkdir -p "$ci_workdir/tmp" "$ci_workdir/assets"
+          {
+            echo "CI_WORKDIR=$ci_workdir"
+            echo "TMPDIR=$ci_workdir/tmp"
+            echo "AUDIO_CUE_LOCATOR_ASSET_STORAGE_ROOT=$ci_workdir/assets"
+            echo "AUDIO_CUE_LOCATOR_ANALYSIS_DB_PATH=$ci_workdir/analysis.sqlite3"
+          } >> "$GITHUB_ENV"
+      - name: Verify prerequisites and install Python tests
+        shell: bash
+        run: |
+          set -eu
+          python -m venv "$CI_WORKDIR/venv"
+          . "$CI_WORKDIR/venv/bin/activate"
+          python tests/test_ci_pipeline_contract.py prerequisites
+          python -m pip install -e '.[test]'
+      - name: Python regression
+        id: pytest
+        shell: bash
+        run: |
+          set -eu
+          . "$CI_WORKDIR/venv/bin/activate"
+          python -m pytest -q tests --junitxml=ci-results/pytest.xml
+      - name: Validate report structure and publication bound
+        id: junit_structure
+        if: ${{ always() }}
+        run: python tests/test_ci_pipeline_contract.py junit-structure ci-results/pytest.xml
+      - name: Validate executed cases and reject skips
+        if: ${{ always() }}
+        run: python tests/test_ci_pipeline_contract.py junit ci-results/pytest.xml
+      - name: WebUI build
+        if: ${{ !cancelled() && steps.pytest.outcome != 'skipped' }}
+        working-directory: webui
+        run: |
+          npm ci
+          npm run build
+      - name: Publish bounded JUnit
+        if: ${{ always() && steps.junit_structure.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: acl-junit-${{ github.sha }}-${{ github.run_attempt }}
+          path: ci-results/pytest.xml
+          if-no-files-found: error
+          retention-days: 7
