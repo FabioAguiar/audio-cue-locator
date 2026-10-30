@@ -72,6 +72,33 @@ etapa (com `ffmpeg`/`ffprobe` disponíveis e, se necessário, uma extensão
 justificada do adapter) possa revisitar a perturbação de compressão e a
 verificação de decodificação ao vivo sem depender de suposições silenciosas.
 
+### 2.1. Ambiente original versus runners de CI posteriores (S0017)
+
+O texto acima e os campos `ffmpeg_available_at_authoring_time`/
+`ffprobe_available_at_authoring_time` (`false`) do manifesto são uma
+observação **histórica** do ambiente de autoria original de M2-04 e são
+preservados sem alteração; não são uma invariante de ambientes posteriores.
+O bloco `ffmpeg_probing_status.environment_distinction` do manifesto
+registra essa distinção.
+
+Os runners obrigatórios de CI introduzidos por S0016 (GitHub Actions e o
+pipeline Jenkins) provisionam `ffmpeg`/`ffprobe` e falham antes do pytest
+quando qualquer um deles está ausente
+(`python tests/test_ci_pipeline_contract.py prerequisites`). Desde S0017,
+`tests/test_matching_robustness.py::test_ffmpeg_probing_status_matches_current_environment`
+verifica a capacidade real do runner atual, separadamente do registro
+histórico: com as ferramentas presentes, sonda e decodifica o fixture
+versionado `tests/fixtures/sine_440hz_mono_1s.wav` pelo
+`FFmpegMediaAdapter` existente (não apenas `which`); sem elas, afirma que o
+verificador de pré-requisitos de CI continua falhando.
+
+Essa verificação de runner **não** altera as conclusões desta avaliação:
+todos os casos continuam sendo arrays sintéticos já canônicos, nenhuma etapa
+de decodificação/canonicalização é exercitada por eles, a avaliação com
+mídia real representativa continua não realizada e a perturbação
+`lossy_compression_roundtrip` continua **não avaliada**. Por isso
+`resolution_status` permanece `not_resolved_by_this_implementation`.
+
 ## 3. Condições de Perturbação Selecionadas
 
 ### 3.1. Incluídas

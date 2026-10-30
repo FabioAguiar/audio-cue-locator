@@ -303,18 +303,45 @@ def test_composition_root_cleans_up_across_terminal_categories_and_isolates_acti
             result_reference="result:recent-not-eligible",
         )
 
-        # Active scenario: still RUNNING, sharing the eligible Analysis's
-        # cue Asset -- this is the artifact cleanup must not delete.
+        # Crash-interrupted scenario: left RUNNING by a previous process,
+        # before this composition root starts. `run_startup_recovery` must
+        # resolve it to FAILED (`docs/restart-and-recovery-policy.md`); it
+        # is never treated as active by this process.
         repository.create(
-            analysis_id="still-active",
+            analysis_id="interrupted-before-startup",
             source_asset_id=_asset_id(),
-            cues=(CueAssetReference(cue_id="cue", asset_id=shared_cue.identifier),),
+            cues=(CueAssetReference(cue_id="cue", asset_id=_asset_id()),),
             effective_configuration=_configuration(),
             queued_at=now - timedelta(minutes=10),
         )
         repository.transition(
-            "still-active", AnalysisLifecycleState.RUNNING, at=now - timedelta(minutes=5)
+            "interrupted-before-startup",
+            AnalysisLifecycleState.RUNNING,
+            at=now - timedelta(minutes=5),
         )
+
+    # Active scenario (S0017): an Analysis that becomes RUNNING only after
+    # the composition root's real recovery phase has run, sharing the
+    # eligible Analysis's cue Asset -- this is the artifact the startup
+    # cleanup that follows must not delete. Recovery itself is unchanged.
+    real_run_startup_recovery = app_module.run_startup_recovery
+
+    def _recovery_then_activate(repository, **kwargs):
+        report = real_run_startup_recovery(repository, **kwargs)
+        activated_at = datetime.now(timezone.utc)
+        repository.create(
+            analysis_id="active-after-recovery",
+            source_asset_id=_asset_id(),
+            cues=(CueAssetReference(cue_id="cue", asset_id=shared_cue.identifier),),
+            effective_configuration=_configuration(),
+            queued_at=activated_at,
+        )
+        repository.transition(
+            "active-after-recovery", AnalysisLifecycleState.RUNNING, at=activated_at
+        )
+        return report
+
+    monkeypatch.setattr(app_module, "run_startup_recovery", _recovery_then_activate)
 
     create_use_case, _ = app_module._build_analysis_use_cases(storage)
     try:
@@ -330,7 +357,17 @@ def test_composition_root_cleans_up_across_terminal_categories_and_isolates_acti
                 reopened.get("succeeded-eligible").state
                 is AnalysisLifecycleState.SUCCEEDED
             )
-            assert reopened.get("still-active").state is AnalysisLifecycleState.RUNNING
+            interrupted = reopened.get("interrupted-before-startup")
+            assert interrupted.state is AnalysisLifecycleState.FAILED
+            assert interrupted.result_reference is None
+            assert interrupted.structured_error == StructuredError(
+                category=FailureCategory.INTERNAL_FAILURE,
+                message=INTERRUPTED_ERROR_MESSAGE,
+            )
+            assert (
+                reopened.get("active-after-recovery").state
+                is AnalysisLifecycleState.RUNNING
+            )
     finally:
         _shutdown(create_use_case)
 

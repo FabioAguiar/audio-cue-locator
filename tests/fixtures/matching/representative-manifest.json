@@ -15,7 +15,13 @@
     "ffprobe_available_at_authoring_time": false,
     "checked_via": "which ffmpeg ffprobe (read-only, no repository/adapter change)",
     "blocking_impact": "ffmpeg/ffprobe remain unavailable in this environment (re-confirmed at implementation time, consistent with canonical_audio.py's own PENDING_LIVE_PROBING_VERIFICATION and states/M2/M2-04/issue-operational-state.json gap G2). This blocks (a) decoding any real encoded audio/video asset for use as a representative cue/source in this evaluation, and (b) performing a genuine lossy-compression round-trip perturbation. As a direct consequence, every signal in this manifest is a synthetically constructed, already-canonical-shaped array (mirroring M2-01/M2-02/M2-03's own synthetic-array convention), not a decoded real-media asset; no canonicalization/decode preprocessing step is exercised by this evaluation at all, so 'preprocessing effects' are explicitly not present here, distinct from and never conflated with the matcher (match_cue) effects that this manifest does measure (amplitude/noise robustness of the normalized-correlation algorithm itself).",
-    "resolution_status": "not_resolved_by_this_implementation"
+    "resolution_status": "not_resolved_by_this_implementation",
+    "environment_distinction": {
+      "authoring_time_fields_are_historical": true,
+      "historical_scope": "ffmpeg_available_at_authoring_time, ffprobe_available_at_authoring_time, checked_via and blocking_impact record the original M2-04 authoring environment only. They are preserved unchanged and are not invariants of any later environment.",
+      "later_ci_environment": "S0016's mandatory CI runners (GitHub Actions and the Jenkins pipeline) provision ffmpeg/ffprobe and fail before pytest when either is missing (python tests/test_ci_pipeline_contract.py prerequisites). S0017: tests/test_matching_robustness.py verifies current runner capability by probing and decoding the versioned tests/fixtures/sine_440hz_mono_1s.wav through the existing FFmpegMediaAdapter, separately from this historical record.",
+      "not_changed_by_later_ci_environment": "Later tool availability does not make this evaluation real-media based: every case remains a synthetic, already-canonical array, no decode/canonicalization preprocessing is exercised by these cases, and the lossy_compression_roundtrip perturbation remains not evaluated. resolution_status is therefore unchanged."
+    }
   },
   "perturbation_conditions": {
     "included": [
