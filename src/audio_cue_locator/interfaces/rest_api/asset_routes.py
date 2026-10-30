@@ -82,23 +82,7 @@ from audio_cue_locator.interfaces.rest_api.errors import (
     ResourceLimitExceededError,
     UnsupportedMediaError,
 )
-from audio_cue_locator.interfaces.rest_api.schemas import (
-    AssetPublic,
-    ErrorPublic,
-    asset_to_public,
-)
-
-_UPLOAD_ERROR_RESPONSES = {
-    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: {"model": ErrorPublic},
-    status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {"model": ErrorPublic},
-    status.HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorPublic},
-    status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorPublic},
-}
-"""The error statuses both upload routes already produce through
-`errors.install_error_handlers` (oversized body, unsupported media,
-malformed multipart, unexpected failure), declared here only so the
-generated OpenAPI advertises them with the shared `ErrorPublic` body. Runtime
-status/error mapping is unchanged."""
+from audio_cue_locator.interfaces.rest_api.schemas import AssetPublic, asset_to_public
 
 
 def build_asset_router(use_case: AssetIngestionUseCase) -> APIRouter:
@@ -120,7 +104,6 @@ def build_asset_router(use_case: AssetIngestionUseCase) -> APIRouter:
         response_model=AssetPublic,
         status_code=status.HTTP_201_CREATED,
         summary="Upload source media as a new Asset",
-        responses=_UPLOAD_ERROR_RESPONSES,
         tags=["v1"],
     )
     async def upload_source_media(request: Request) -> AssetPublic:
@@ -131,7 +114,6 @@ def build_asset_router(use_case: AssetIngestionUseCase) -> APIRouter:
         response_model=AssetPublic,
         status_code=status.HTTP_201_CREATED,
         summary="Upload a cue as a new Asset",
-        responses=_UPLOAD_ERROR_RESPONSES,
         tags=["v1"],
     )
     async def upload_cue(request: Request) -> AssetPublic:

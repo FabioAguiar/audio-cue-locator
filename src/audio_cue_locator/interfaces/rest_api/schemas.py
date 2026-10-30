@@ -342,22 +342,10 @@ class AnalysisResultEnvelope(_ForbidExtraModel):
     version (acceptance criterion 4). `result` stays an untyped mapping
     deliberately, so this module does not duplicate or redefine the M3
     Result schema documented in `docs/analysis-result-schema.md`.
-
-    S0017: both version fields are required, matching the versioned public
-    contract (`tests/test_api_v1_contracts.py`), so a constructed envelope
-    can never silently fall back to a substituted version:
-    `analysis_result_to_envelope` supplies `api_version` from `API_VERSION`
-    and `result_schema_version` from the stored Result body. The current
-    Core Result schema version is still published as that field's schema
-    `default` annotation only, so the generated OpenAPI keeps showing that
-    it differs from `api_version`.
     """
 
-    api_version: Literal["v1"]
-    result_schema_version: str = Field(
-        ...,
-        json_schema_extra={"default": CORE_ANALYSIS_RESULT_SCHEMA_VERSION},
-    )
+    api_version: Literal["v1"] = API_VERSION
+    result_schema_version: str = CORE_ANALYSIS_RESULT_SCHEMA_VERSION
     result: dict = Field(
         ...,
         description=(
@@ -380,7 +368,6 @@ def analysis_result_to_envelope(result: Mapping[str, object]) -> AnalysisResultE
     if not isinstance(schema_version, str) or not schema_version:
         raise ValueError("Result schema_version must be a non-empty string")
     return AnalysisResultEnvelope(
-        api_version=API_VERSION,
         result_schema_version=schema_version,
         result=dict(result),
     )
