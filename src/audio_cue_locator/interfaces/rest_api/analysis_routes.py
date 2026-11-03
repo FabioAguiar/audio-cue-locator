@@ -90,6 +90,14 @@ _RESULT_ERROR_RESPONSES = {
     **_STATUS_ERROR_RESPONSES,
     status.HTTP_409_CONFLICT: {"model": ErrorPublic},
 }
+_CREATE_ERROR_RESPONSES = {
+    status.HTTP_400_BAD_REQUEST: {"model": ErrorPublic},
+    status.HTTP_404_NOT_FOUND: {"model": ErrorPublic},
+    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: {"model": ErrorPublic},
+    status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {"model": ErrorPublic},
+    status.HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorPublic},
+    status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorPublic},
+}
 _AUDITION_SUCCESS_RESPONSE = {
     status.HTTP_200_OK: {
         "content": {"audio/wav": {"schema": {"type": "string", "format": "binary"}}},
@@ -128,6 +136,7 @@ def build_analysis_router(
         response_model=AnalysisPublic,
         status_code=status.HTTP_202_ACCEPTED,
         summary="Create an Analysis asynchronously from Asset identities",
+        responses=_CREATE_ERROR_RESPONSES,
         tags=["v1"],
     )
     def create_analysis(payload: AnalysisCreateRequest, response: Response) -> AnalysisPublic:

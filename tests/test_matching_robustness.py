@@ -132,33 +132,68 @@ def test_manifest_covers_the_required_perturbation_categories():
     assert compression_omission["reason"]
 
 
-def test_ffmpeg_probing_status_matches_current_environment():
+def test_ffmpeg_probing_status_matches_current_environment(tmp_path):
     """Formal issue section 8, criterion 4: the pending M1 live FFmpeg
     probing/decode verification's status must be resolved or its blocking
-    impact explicitly recorded, not silently stale. This regression check
-    fails loudly if ffmpeg/ffprobe become available without the manifest's
-    documented status being updated to match."""
+    impact explicitly recorded, not silently stale.
+
+    S0017 separates two different facts this check previously conflated:
+    the manifest's authoring-time availability fields are a historical
+    observation of the original M2-04 environment (always preserved as
+    recorded), while the current runner's capability is verified live here.
+    With ffmpeg/ffprobe present, the versioned
+    `tests/fixtures/sine_440hz_mono_1s.wav` is actually probed and decoded
+    through the existing `FFmpegMediaAdapter` (not merely located on
+    PATH). Without them, the mandatory CI prerequisite checker must still
+    fail, so a tool-less runner can never produce a green mandatory run."""
 
     status = _MANIFEST["ffmpeg_probing_status"]
-    ffmpeg_available_now = shutil.which("ffmpeg") is not None
-    ffprobe_available_now = shutil.which("ffprobe") is not None
 
-    assert status["ffmpeg_available_at_authoring_time"] == ffmpeg_available_now, (
-        "ffmpeg availability changed since this manifest was authored; "
-        "re-evaluate the blocking impact and update "
-        "tests/fixtures/matching/representative-manifest.json and "
-        "docs/matching-robustness.md before trusting this evaluation's "
-        "representative-matching claims (formal issue section 8, criterion 4)."
-    )
-    assert status["ffprobe_available_at_authoring_time"] == ffprobe_available_now, (
-        "ffprobe availability changed since this manifest was authored; "
-        "re-evaluate the blocking impact and update "
-        "tests/fixtures/matching/representative-manifest.json and "
-        "docs/matching-robustness.md before trusting this evaluation's "
-        "representative-matching claims (formal issue section 8, criterion 4)."
-    )
+    # Historical M2-04 provenance: never rewritten to match a later runner.
+    assert status["ffmpeg_available_at_authoring_time"] is False
+    assert status["ffprobe_available_at_authoring_time"] is False
+    assert status["checked_via"]
     assert status["blocking_impact"]
     assert status["resolution_status"] == "not_resolved_by_this_implementation"
+    distinction = status["environment_distinction"]
+    assert distinction["authoring_time_fields_are_historical"] is True
+    assert distinction["historical_scope"]
+    assert distinction["later_ci_environment"]
+    assert distinction["not_changed_by_later_ci_environment"]
+
+    # Later tool availability never turns this synthetic evaluation into a
+    # real-media one, nor evaluates lossy compression.
+    assert _MANIFEST["provenance"]["asset_source"] == "synthetically_generated_in_manifest"
+    assert "lossy_compression_roundtrip" in {
+        condition["condition_id"]
+        for condition in _MANIFEST["perturbation_conditions"]["omitted"]
+    }
+
+    # Current runner capability, verified live.
+    if shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None:
+        from audio_cue_locator.infrastructure.media_processing.ffmpeg_adapter import (
+            FFmpegMediaAdapter,
+        )
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "sine_440hz_mono_1s.wav"
+        adapter = FFmpegMediaAdapter()
+        probe_result = adapter.probe(str(fixture))
+        assert probe_result.has_audio_stream is True
+        assert probe_result.audio_stream_index is not None
+        assert probe_result.duration_seconds is not None
+        assert probe_result.duration_seconds > 0
+
+        extraction_result = adapter.extract_audio(
+            str(fixture), str(tmp_path / "decoded.wav")
+        )
+        decoded = Path(extraction_result.output_path)
+        assert decoded.is_file()
+        assert decoded.stat().st_size > 44
+    else:
+        from tests.test_ci_pipeline_contract import check_prerequisites
+
+        with pytest.raises(ValueError):
+            check_prerequisites()
 
 
 @pytest.mark.parametrize("case", _CASES, ids=_CASE_IDS)
